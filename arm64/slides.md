@@ -34,9 +34,15 @@ ISA 定义了支持的指令、数据类型、寄存器、内存管理、基本�
 
 # 内容
 
+- 前置知识：
+  - ARMv8 手册的术语
+  - 虚拟地址
 - Cache
+  - Cache-line
+  - Cache Miss
 - VMSA (Virtual Memory System Architecture)
-- ARMv8 内存模型
+  - VMSA 地址翻译系统
+  - `TCR_ELx` 寄存器
 
 ---
 
@@ -51,9 +57,11 @@ ISA 定义了支持的指令、数据类型、寄存器、内存管理、基本�
 - kernel 和 userspace 运行在不同的异常等级下，不同异常等级可以实现权限管理
 - userspace-EL0, kernel-EL1, 虚拟化-EL2
 
-**TLB**：Translation lookup table，页表的 Cache
+**Translation Tables**：页表
 
-**Granule Size**：ARMv8 手册中表示页表大小
+**TLB**：Translation Lookaside Buffers，页表的 Cache
+
+**Granule Size**：在 ARMv8 手册中，它表示页表的大小
 
 ---
 
@@ -125,13 +133,57 @@ ARMv8 的多级 Cache 结构：
 
 # VMSAv8-64 地址翻译系统
 
-VMSA 涉及的寄存器：
+VMSA 重要寄存器：
 
-- 页表在 ARMv8 中被统称为 translation tables，页表大小可以是 4/16/64KB
-  - 配置的寄存器是 `TCR_EL1.TG[1|0]`
-  - TG1 决定了 `TTBR1_EL1` 的页表大小，TG0 决定了 `TTBR0_EL1` 的页表大小
+- 页表大小为 4/16/64 KB，配置的寄存器比特是 `TCR_EL1.TG[1|0]`，其决定了 `TTBR[1|0]_EL1` 的页表大小
 - OA 大小：`TCR_EL1.{I}PS`
 - IA 大小：支持 2 个范围的 VA
   - `TCR_EL1.T0SZ` 用于指定地址较小的 VA 段大小，MMU 使用 `TTBR0_EL1`
   - `TCR_EL1.T1SZ` 用于指定地址较大的 VA 段大小，MMU 使用 `TTBR1_EL1`
 - `TTBR0_EL1`/`TBR1_EL1` 保存了 pgd 的地址
+
+`ID_AA64MMFR0_EL1`, AArch64 Memory Model Feature Register 0
+
+- 提供实现内存模型和内存管理的信息
+- `TGran4`, [31:28]：对 4KB 页表的支持，其中 0b0000 表示支持
+- `TGran64`, [27:24]：对 64KB 页表的支持，其中 0b0000 表示支持，0b1111 不支持
+- `PARange`, [3:0]: 物理地址范围，其中 0b0101 表示 48 bits
+
+---
+
+# TCR_ELx 寄存器
+
+`TCR_EL1`, Translation Control Register，控制 stage 1 的 translation regime
+
+- TBID1, [52]：控制 TBI 的作用范围
+  - 0 表示用于维护 cache 的指令和数据访问
+  - 1 表示只用于数据访问
+- HA, [39]：Hardware Access flag update in stage 1 translations
+- TBI1, [38]：Top Byte ignored，地址计算是否要考虑 top byte (即最高的 8 位)
+- AS, [36]：ASID size，1 表示 16 bits，0 表示 8 bits
+- TG1, [31:30], TG0 [15:14]：`TTBR1_EL1` 的 Granule size，即页表大小，如 0b10 表示 4KB
+- T1SZ [21:16], T0SZ [5:0]：基于 `TTBR1_EL1` 的寻址区域，大小为 2^(64-T0SZ) bytes
+- IRGN1 [25:24], IRGN0 [9:8]：基于 `TTBR1_EL1` 的 inner cacheability
+- SH1 [29:28], SH0 [13:12]：基于 `TTBR1_EL1` 的 shareability
+- A1, [22]：决定使用 `TTBR0_EL1.ASID` 还是 `TTBR1_EL1.ASID` 来表示 ASID
+
+---
+
+# 页表描述符
+
+页表项保存的地址都是 4K 对齐的，其低 12 位用来作为页表描述符，描述页表的属性
+
+level 1 和 2 descriptor:
+
+- APTable, bits[62:61]：Access permissions
+- bit[1]：标识 descriptor 类型；0 表示 Block, 1 表示 Table
+
+level 3 descriptor：
+
+- bit[0]：标识页表是否有效，1 表示有效
+- bit[1]：标识了 descriptor 类型；0 保留, 1 表示 Page
+- bits[63:52]：Upper page attributes
+  - PBHA, bits[62:59]：Page-based hardware attributes bits
+- bits[11:2]：Lower page attributes
+  - AF, bit[10]：The Access flag
+  - AP[2:1], bits[7:6]：Access Permissions
