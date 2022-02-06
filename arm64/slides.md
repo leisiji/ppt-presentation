@@ -117,7 +117,7 @@ ARMv8 的多级 Cache 结构：
 减小 Cache Miss 也是软件的一个优化方向，比如 linux kernel 就有许多 Cache 的优化策略：
 
 - `____cacheline_aligned` 宏：使数据结构和 Cache line 对齐
-- Static keys：动态修改跳转的分支，减小分支跳转导致的 I-cache miss，参考 Documentation/staging/static-keys.rst
+- Static keys：动态修改跳转的分支，减小分支跳转导致的 I-cache miss，参考 static-keys.rst
 
 一个可以感知到 Cache Miss 的例子（test/cache.cpp）
 
@@ -128,6 +128,18 @@ ARMv8 的多级 Cache 结构：
 - 原本 TLB 只通过 VA 来判断是否出现 TLB miss
 - 加入 ASID 后，TLB 可以通过 ASID+VA 来判断是否有 TLB miss
 - ASID 是每一个进程分配一个，这样在切换进程后也无需 flush TLB
+
+---
+
+# Cache 一致性
+
+2 个术语 PoU 和 PoC：
+
+- Point of Unification (PoU)：以一个特定的 PE（该 PE 执行了 cache 指令）为视角
+  - PE 需要经过各级 cache（icache, dcache, TLB）访问内存，在某个点上会访问到同一个副本，该点就是该 PE 的 PoU
+  - 假设 cpu 的每个核都有自己的 L1 icache 和 L1 dcache，所有的核共享 L2 cache，则 PoU 就是 L2 cache
+- Point of Coherency (PoC)：以系统中所有的 agent（bus master，也称为 observer，如 CPU、DMA engine）为视角
+  - 由于 DMA controller 不通过 cache 访问内存，因此 PoC 只能是内存了
 
 ---
 
