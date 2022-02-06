@@ -21,363 +21,334 @@ drawings:
   persist: false
 ---
 
-# Welcome to Slidev
+# linux 页表
 
-Presentation slides for developers
-
-<div class="pt-12">
-  <span @click="$slidev.nav.next" class="px-2 py-1 rounded cursor-pointer" hover="bg-white bg-opacity-10">
-    Press Space for next page <carbon:arrow-right class="inline"/>
-  </span>
-</div>
-
-<div class="abs-br m-6 flex gap-2">
-  <button @click="$slidev.nav.openInEditor()" title="Open in Editor" class="text-xl icon-btn opacity-50 !border-none !hover:text-white">
-    <carbon:edit />
-  </button>
-  <a href="https://github.com/slidevjs/slidev" target="_blank" alt="GitHub"
-    class="text-xl icon-btn opacity-50 !border-none !hover:text-white">
-    <carbon-logo-github />
-  </a>
-</div>
-
-<!--
-The last comment block of each slide will be treated as slide notes. It will be visible and editable in Presenter Mode along with the slide. [Read more in the docs](https://sli.dev/guide/syntax.html#notes)
--->
+多级页表是基于硬件 MMU 实现的功能，从而实现进程隔离
 
 ---
 
-# What is Slidev?
+# 内容
 
-Slidev is a slides maker and presenter designed for developers, consist of the following features
+- MMU, va, pa
+- 为什么需要多级页表
+- Linux 的多级页表机制
+- 通过 Linux 验证学习中的理解
 
-- 📝 **Text-based** - focus on the content with Markdown, and then style them later
-- 🎨 **Themable** - theme can be shared and used with npm packages
-- 🧑‍💻 **Developer Friendly** - code highlighting, live coding with autocompletion
-- 🤹 **Interactive** - embedding Vue components to enhance your expressions
-- 🎥 **Recording** - built-in recording and camera view
-- 📤 **Portable** - export into PDF, PNGs, or even a hostable SPA
-- 🛠 **Hackable** - anything possible on a webpage
+----
 
-<br>
-<br>
+# MMU (Memory Management Unit)
 
-Read more about [Why Slidev?](https://sli.dev/guide/why)
+MMU 其中一个功能就是将虚拟地址转换物理地址
 
-<!--
-You can have `style` tag in markdown to override the style for the current page.
-Learn more: https://sli.dev/guide/syntax#embedded-styles
--->
+- linux 进程访问的地址是虚拟地址（va）
+- 对于 stm32 这些没有 MMU 的 CPU，只能直接使用物理地址
 
-<style>
-h1 {
-  background-color: #2B90B6;
-  background-image: linear-gradient(45deg, #4EC5D4 10%, #146b8c 20%);
-  background-size: 100%;
-  -webkit-background-clip: text;
-  -moz-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  -moz-text-fill-color: transparent;
-}
-</style>
+pa 和 va 之间的转换也叫做映射：
+
+- 映射粒度：VA 到 PA 映射的单位大小是页 (Page)，页大小一般为 4k
+- 页帧 (Page Frame) 指物理内存中的一页内存，MMU 的转换就是寻找物理页帧和页内偏移的过程
+- 映射规则：MMU 的映射规则由页表 (Page Table) 来描述，每个进程会维护**一套**页表
 
 ---
 
-# Navigation
+# 虚拟地址和物理地址
 
-Hover on the bottom-left corner to see the navigation's controls panel, [learn more](https://sli.dev/guide/navigation.html)
+Linux kernel 代码需要区分什么时候加载的是物理地址，什么时候是虚拟地址
 
-### Keyboard Shortcuts
+kernel 中所有代码的编译 flag 大多是相同的，但是 head.S（MMU 开启前）和其他代码如何做到分别访问 pa 和 va
 
-|     |     |
-| --- | --- |
-| <kbd>right</kbd> / <kbd>space</kbd>| next animation or slide |
-| <kbd>left</kbd>  / <kbd>shift</kbd><kbd>space</kbd> | previous animation or slide |
-| <kbd>up</kbd> | previous slide |
-| <kbd>down</kbd> | next slide |
+答案在于：编译器对内存地址的处理
 
-<!-- https://sli.dev/guide/animations.html#click-animations -->
-<img
-  v-click
-  class="absolute -bottom-9 -left-7 w-80 opacity-50"
-  src="https://sli.dev/assets/arrow-bottom-left.svg"
-/>
-<p v-after class="absolute bottom-23 left-45 opacity-30 transform -rotate-10">Here!</p>
+- 编译器不知道目标平台是否有 MMU，因此汇编中访问代码中变量的地址都是相对地址（既不是 pa 也不是 va）
+- 相对地址有专门的寻址方式以及指令，交由平台自身来计算目标地址
+
+但对于平台相关的寄存器地址，如 stm32 的 I2C DMA 就是一个固定地址，这部分就是绝对的物理地址
+
+> 为了避免编译器优化，访问一个绝对的物理地址（常量物理地址）会通常加上 `volatile` 关键字
 
 ---
-layout: image-right
-image: https://source.unsplash.com/collection/94734566/1920x1080
+
+# VA 到 PA 的转化过程（kernel）
+
+对于 kernel，va 和 pa 都是线性映射，va 转化为 pa 不需要遍历各级页表
+
+kernel pa 转化需要分为 2 个区域
+
+- linear map：
+  - va 是 `[PAGE_OFFSET, PAGE_END)`，位于 TTBR1 地址范围的底部
+  - pa 起始地址是 `va - PAGE_OFFSET + PHYS_OFFSET`
+  - va/pa 之间的差值是 `memstart_addr`
+- kernel img：
+  - kernel 各个符号值就是该段的 va，因此也称为 `__pa_symbol`
+  - `pa = va - kimage_voffset = va + __PHYS_OFFSET - pa(_text)`
+  - va/pa 之间的差值是 `kimage_voffset`
+- 2 个 va 区域的分界线是 `PAGE_END`（负数），va 小于这个数为 linear map
+
 ---
 
-# Code
+# VA 到 PA 转化的代码（kernel）
 
-Use code snippets and get the highlighting directly![^1]
+```c
+/* __va 只能用于 linear map */
+#define __va(x) ((void *)__phys_to_virt((phys_addr_t)(x)))
+#define __pa(x) __virt_to_phys((unsigned long)(x))
 
-```ts {all|2|1-6|9|all}
-interface User {
-  id: number
-  firstName: string
-  lastName: string
-  role: string
-}
+#define __phys_to_virt(x) ((unsigned long)((x)-PHYS_OFFSET) | PAGE_OFFSET)
+#define __virt_to_phys(x)                                                      \
+    ({                                                                         \
+        phys_addr_t __x = (phys_addr_t)(x);                                    \
+        __is_lm_address(__x) ? __lm_to_phys(__x) : __kimg_to_phys(__x);        \
+    })
 
-function updateUser(id: number, update: User) {
-  const user = getUser(id)
-  const newUser = {...user, ...update}  
-  saveUser(id, newUser)
-}
+// 线性地址部分：PAGE_OFFSET = -1^48, PAGE_END = -1^47
+#define __is_lm_address(addr) (((u64)(addr)-PAGE_OFFSET) < (PAGE_END - PAGE_OFFSET))
+#define __lm_to_phys(addr)    (((addr)-PAGE_OFFSET) + PHYS_OFFSET)
+
+// kernel image 部分
+#define __phys_to_kimg(x) ((unsigned long)((x) + kimage_voffset))
+#define __kimg_to_phys(addr) ((addr)-kimage_voffset)
+
+// pa_symbol = va - kimage_voffset，相比 `__pa` 宏少了判断的开销
+#define __pa_symbol(x)          __phys_addr_symbol(x)
+#define __phys_addr_symbol(x)   __kimg_to_phys((phys_addr_t)(x))
 ```
 
-<arrow v-click="3" x1="400" y1="420" x2="230" y2="330" color="#564" width="3" arrowSize="1" />
-
-[^1]: [Learn More](https://sli.dev/guide/syntax.html#line-highlighting)
-
-<style>
-.footnotes-sep {
-  @apply mt-20 opacity-10;
-}
-.footnotes {
-  @apply text-sm opacity-75;
-}
-.footnote-backref {
-  display: none;
-}
-</style>
-
 ---
 
-# Components
-
-<div grid="~ cols-2 gap-4">
-<div>
-
-You can use Vue components directly inside your slides.
-
-We have provided a few built-in components like `<Tweet/>` and `<Youtube/>` that you can use directly. And adding your custom components is also super easy.
-
-```html
-<Counter :count="10" />
-```
-
-<!-- ./components/Counter.vue -->
-<Counter :count="10" m="t-4" />
-
-Check out [the guides](https://sli.dev/builtin/components.html) for more.
-
-</div>
-<div>
-
-```html
-<Tweet id="1390115482657726468" />
-```
-
-<Tweet id="1390115482657726468" scale="0.65" />
-
-</div>
-</div>
-
-
----
-class: px-20
----
-
-# Themes
-
-Slidev comes with powerful theming support. Themes can provide styles, layouts, components, or even configurations for tools. Switching between themes by just **one edit** in your frontmatter:
-
-<div grid="~ cols-2 gap-2" m="-t-2">
-
-```yaml
----
-theme: default
----
-```
-
-```yaml
----
-theme: seriph
----
-```
-
-<img border="rounded" src="https://github.com/slidevjs/themes/blob/main/screenshots/theme-default/01.png?raw=true">
-
-<img border="rounded" src="https://github.com/slidevjs/themes/blob/main/screenshots/theme-seriph/01.png?raw=true">
-
-</div>
-
-Read more about [How to use a theme](https://sli.dev/themes/use.html) and
-check out the [Awesome Themes Gallery](https://sli.dev/themes/gallery.html).
-
----
-preload: false
----
-
-# Animations
-
-Animations are powered by [@vueuse/motion](https://motion.vueuse.org/).
-
-```html
-<div
-  v-motion
-  :initial="{ x: -80 }"
-  :enter="{ x: 0 }">
-  Slidev
-</div>
-```
-
-<div class="w-60 relative mt-6">
-  <div class="relative w-40 h-40">
-    <img
-      v-motion
-      :initial="{ x: 800, y: -100, scale: 1.5, rotate: -50 }"
-      :enter="final"
-      class="absolute top-0 left-0 right-0 bottom-0"
-      src="https://sli.dev/logo-square.png"
-    />
-    <img
-      v-motion
-      :initial="{ y: 500, x: -100, scale: 2 }"
-      :enter="final"
-      class="absolute top-0 left-0 right-0 bottom-0"
-      src="https://sli.dev/logo-circle.png"
-    />
-    <img
-      v-motion
-      :initial="{ x: 600, y: 400, scale: 2, rotate: 100 }"
-      :enter="final"
-      class="absolute top-0 left-0 right-0 bottom-0"
-      src="https://sli.dev/logo-triangle.png"
-    />
-  </div>
-
-  <div
-    class="text-5xl absolute top-14 left-40 text-[#2B90B6] -z-1"
-    v-motion
-    :initial="{ x: -80, opacity: 0}"
-    :enter="{ x: 0, opacity: 1, transition: { delay: 2000, duration: 1000 } }">
-    Slidev
-  </div>
-</div>
-
-<!-- vue script setup scripts can be directly used in markdown, and will only affects current page -->
-<script setup lang="ts">
-const final = {
-  x: 0,
-  y: 0,
-  rotate: 0,
-  scale: 1,
-  transition: {
-    type: 'spring',
-    damping: 10,
-    stiffness: 20,
-    mass: 2
-  }
-}
-</script>
-
-<div
-  v-motion
-  :initial="{ x:35, y: 40, opacity: 0}"
-  :enter="{ y: 0, opacity: 1, transition: { delay: 3500 } }">
-
-[Learn More](https://sli.dev/guide/animations.html#motion)
-
-</div>
-
----
-
-# LaTeX
-
-LaTeX is supported out-of-box powered by [KaTeX](https://katex.org/).
+# 思考
 
 <br>
 
-Inline $\sqrt{3x-1}+(1+x)^2$
+`__va` 不能转化 kernel img pa 为 va？kernel img 通过符号表达地址，其地址不是动态的；`__phys_to_kimg` 可以用来转化 kimg pa 为 va
 
-Block
-$$
-\begin{array}{c}
-
-\nabla \times \vec{\mathbf{B}} -\, \frac1c\, \frac{\partial\vec{\mathbf{E}}}{\partial t} &
-= \frac{4\pi}{c}\vec{\mathbf{j}}    \nabla \cdot \vec{\mathbf{E}} & = 4 \pi \rho \\
-
-\nabla \times \vec{\mathbf{E}}\, +\, \frac1c\, \frac{\partial\vec{\mathbf{B}}}{\partial t} & = \vec{\mathbf{0}} \\
-
-\nabla \cdot \vec{\mathbf{B}} & = 0
-
-\end{array}
-$$
-
-<br>
-
-[Learn more](https://sli.dev/guide/syntax#latex)
+`__phys_to_virt` 没有判断是否处于 linear map？因为 kernel img pa 是由 bootloader 决定的，无法在编译时知道
 
 ---
 
-# Diagrams
+# 为什么需要多级页表
 
-You can create diagrams / graphs from textual descriptions, directly in your Markdown.
+32 位 linux 使用 2 级页表，到了 64 位时代，就到了 4 级页表，页表的级数增长主要和地址空间大小相关
 
-<div class="grid grid-cols-3 gap-10 pt-4 -mb-6">
+- 4K 页表的 32 位 linux
+  - 指针大小为 4 字节，一个页表可以有 4k/4 = 1024 个页表项
+  - 2 级页表能够表达的地址空间就是：1024 * 1024 * 4K = 2^(10+10+12) = 2^32
+- 4K 页表的 64 位 linux
+  - 指针大小为 8 字节，一个页表可以有 4k/8 = 512 个页表项
+  - 4 级页表能够表达的地址空间就是：512^4 * 4K = 2^(9*4+12) = 2^48
 
-```mermaid {scale: 0.5}
-sequenceDiagram
-    Alice->John: Hello John, how are you?
-    Note over Alice,John: A typical interaction
+在某些 64 位平台上，也不一定需要用完 48 位的地址空间，比如 mt9652 就是 39
+
+```txt
+# linux kernel 中页表相关的配置
+CONFIG_PGTABLE_LEVELS=4
+CONFIG_ARM64_VA_BITS_48=y
+CONFIG_ARM64_VA_BITS=48
+CONFIG_ARM64_PA_BITS_48=y
+CONFIG_ARM64_PA_BITS=48
+CONFIG_ARM64_4K_PAGES=y
+# CONFIG_ARM64_VA_BITS_39 is not set
 ```
-
-```mermaid {theme: 'neutral', scale: 0.8}
-graph TD
-B[Text] --> C{Decision}
-C -->|One| D[Result 1]
-C -->|Two| E[Result 2]
-```
-
-```plantuml {scale: 0.7}
-@startuml
-
-package "Some Group" {
-  HTTP - [First Component]
-  [Another Component]
-}
-
-node "Other Groups" {
-  FTP - [Second Component]
-  [First Component] --> FTP
-}
-
-cloud {
-  [Example 1]
-}
-
-
-database "MySql" {
-  folder "This is my folder" {
-    [Folder 3]
-  }
-  frame "Foo" {
-    [Frame 4]
-  }
-}
-
-
-[Another Component] --> [Example 1]
-[Example 1] --> [Folder 3]
-[Folder 3] --> [Frame 4]
-
-@enduml
-```
-
-</div>
-
-[Learn More](https://sli.dev/guide/syntax.html#diagrams)
-
 
 ---
-layout: center
-class: text-center
+
+# Linux 的多级页表机制
+
+Linux 的多级页表机制是基于硬件的，但是业界对 CPU 都达成了公式，都在 MMU 实现了多级页表的机制
+
+Linux 的 4 级页表名称：PGD, PUD, PMD, PTE
+
+虚拟地址：各级页表项的索引 + 页内偏移
+
+各级页表项的索引计算如下，而页内偏移就是 va 的低 12 位
+
+```c
+// 页表项的定义：页表项本质是一个 u64，它的值就是下一级页表起始物理地址
+typedef struct { pteval_t pte; } pte_t; // typedef u64 pteval_t;
+typedef struct { pmdval_t pmd; } pmd_t; // typedef u64 pmdval_t;
+typedef struct { pudval_t pud; } pud_t; // typedef u64 pudval_t;
+typedef struct { pgdval_t pgd; } pgd_t; // typedef u64 p4dval_t;
+
+/* 每级页表的 shift 分别为 39, 30, 21, 12, PTRS_PER_PXX 都是 512 */
+#define pgd_index(a)  (((a) >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1))
+unsigned long pud_index(unsigned long address) { return (address >> PUD_SHIFT) & (PTRS_PER_PUD - 1); }
+unsigned long pmd_index(unsigned long address) { return (address >> PMD_SHIFT) & (PTRS_PER_PMD - 1); }
+unsigned long pte_index(unsigned long address) { return (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1); }
+```
+
 ---
 
-# Learn More
+# 获取页表项值
 
-[Documentations](https://sli.dev) · [GitHub](https://github.com/slidevjs/slidev) · [Showcases](https://sli.dev/showcases.html)
+页表项值 (`pxx_page_paddr` 宏)，代码中只能访问虚拟地址（`pxx_page_vaddr` 宏），但是可以往虚拟地址写入物理地址
+
+```c
+phys_addr_t p4d_page_paddr(p4d_t p4d) {
+    return __p4d_to_phys(p4d);
+}
+phys_addr_t pud_page_paddr(pud_t pud) {
+    return __pud_to_phys(pud); // __pud_to_phys 本质就是 pud_t.pud
+}
+phys_addr_t pmd_page_paddr(pmd_t pmd) {
+    return __pmd_to_phys(pmd);
+}
+
+// pxx_page_vaddr 比较常用，因为代码读取或写入页表项都只能通过 va 进行
+#define pgd_page_vaddr(pgd)   (p4d_page_vaddr((p4d_t){ pgd }))
+unsigned long p4d_page_vaddr(p4d_t p4d) {
+    return (unsigned long)__va(p4d_page_paddr(p4d));
+}
+unsigned long pmd_page_vaddr(pmd_t pmd) {
+    return (unsigned long)__va(pmd_page_paddr(pmd));
+}
+unsigned long pud_page_vaddr(pud_t pud) {
+    return (unsigned long)__va(pud_page_paddr(pud));
+}
+```
+
+---
+
+# 页表项
+
+获取页表项 va 有多种接口，不同接口的输入参数不同，而且名字风格也有不同：
+
+| 接口名                      | 输入参数                   |
+| ---                         | ---                        |
+| `[pgd,pud,pmd]_offset`      | 上级页表项和 va            |
+| `pgd_offset_pgd`            | pgd 首地址和 va            |
+| `pgd_offset_k`              | kernel va                  |
+| `pmd_off`                   | mm 和 va                   |
+| `pmd_off_k`                 | kernel va                  |
+| `virt_to_kpte`              | kernel va                  |
+| `pte_offset_kernel()`       | 上级页表项 pmd 和 va       |
+
+---
+
+# 页表项相关代码
+
+这里只有 pmd 和 pte 的代码，其他参考源码进行类比即可
+
+pmd:
+
+```c
+// 可以用于 userspace 和 kernel va
+pmd_t *pmd_offset(pud_t *pud, unsigned long address) { return (pmd_t *)pud_page_vaddr(*pud) + pmd_index(address); }
+// 可以用于 userspace 和 kernel va
+pmd_t *pmd_off(struct mm_struct *mm, unsigned long va) { return pmd_offset(pud_offset(p4d_offset(pgd_offset(mm, va), va), va), va); }
+// 只能用于 kernel va
+pmd_t *pmd_off_k(unsigned long va) { return pmd_offset(pud_offset(p4d_offset(pgd_offset_k(va), va), va), va); }
+```
+
+pte:
+
+```c
+pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address) {
+    return (pte_t *)pmd_page_vaddr(*pmd) + pte_index(address);
+}
+pte_t *virt_to_kpte(unsigned long vaddr) {
+    pmd_t *pmd = pmd_off_k(vaddr);
+    return pmd_none(*pmd) ? NULL : pte_offset_kernel(pmd, vaddr);
+}
+```
+
+---
+
+# 页表项相关代码
+
+其他 2 个宏：
+
+`pxx_offset_kimg`：
+
+- 输入上级页表项和 va，也是返回页表项 va
+- 但是只能用于处在 kernel img 的页表如 `bm_pud`（用到了 `__phys_to_kimg`）
+
+`pxx_offset_phys`：输入上级页表项和 va，但是返回页表项 pa
+
+```c
+#define pmd_offset_kimg(dir, addr)                                             \
+    ((pmd_t *)__phys_to_kimg(pmd_offset_phys(dir, addr)))
+
+#define pmd_offset_phys(dir, addr)                                             \
+    (pud_page_paddr(READ_ONCE(*(dir))) + pmd_index(addr) * sizeof(pmd_t))
+```
+
+---
+
+# qemu+gdb 调试 linux
+
+软件：qemu, qemu-arch-extra, aarch64-linux-gnu-gdb, aarch64-linux-gnu-gcc, cpio
+
+步骤：
+
+- 制作 initrd
+- 编译 kernel
+- qemu 启动 kernel，并进入监听状态，等待 gdb 连接
+- 启动 gdb，之后可以加入断点、打印变量、单步调试
+
+---
+
+# 制作 initrd 和编译 kernel
+
+```bash
+# 首先要制作 initrd：
+wget https://busybox.net/downloads/busybox-1.34.1.tar.bz2
+tar -jxvf busybox-1.31.0.tar.bz2
+cd busybox-1.33.2
+# 选择 Settings -> Build static binary (no shared libs)
+# Settings -> Cross compiler prefix 填入 aarch64-linux-gnu-
+make menuconfig
+make && make install
+cd _install
+mkdir dev && cd dev
+sudo mknod console c 5 1
+sudo mknod null c 1 3
+sudo mknod tty1 c 4 1
+sudo mknod tty2 c 4 2
+sudo mknod tty3 c 4 3
+sudo mknod tty4 c 4 4
+cd ..
+find . | cpio -o -H newc |gzip > ../rootfs.cpio.gz
+
+# 编译 kernel：生成的内核镱像位于 arch/arm[64]/boot/zImage
+make ARCH=arm64 defconfig
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j8
+```
+
+---
+
+# qemu 启动 kernel
+
+gdb 调试 kernel，qemu 必须加 nokaslr，否则无法插入断点
+
+```bash
+qemu-system-aarch64 \
+    -machine virt \
+    -nographic \
+    -m size=1024M \
+    -cpu cortex-a57 \
+    -smp 1 \
+    -kernel arch/arm64/boot/Image \
+    --append "console=ttyAMA0 rdinit=/linuxrc nokaslr" \
+    -initrd ~/rootfs.cpio.gz \
+    -S -s
+```
+
+gdb
+
+```bash
+aarch64-linux-gnu-gdb vmlinux -ex "target remote:1234" -tui
+```
+
+---
+
+# clangd+vscode 阅读 linux 源码
+
+优势：
+
+- 可以显示宏的值
+- 基于语义查找定义、引用、调用树
+- arm64 代码的定义不会跳转到 x86 的定义上，会根据编译结果查找
+
+利用 `scripts/clang-tools/gen_compile_commands.py` 脚本生成 `compile_commands.json`
+
+- clangd 会根据 `compile_commands.json` 生成代码索引
+- 该脚本在高版本的 kernel 源码树中，但在低版本的源码也可以工作
