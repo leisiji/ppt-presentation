@@ -1,11 +1,7 @@
 ---
 # try also 'default' to start simple
 theme: seriph
-# random image from a curated Unsplash collection by Anthony
-# like them? see https://unsplash.com/collections/94734566/slidev
-background: https://source.unsplash.com/collection/94734566/1920x1080
-# apply any windi css classes to the current slide
-class: 'text-center'
+layout: 'intro'
 # https://sli.dev/custom/highlighters.html
 highlighter: shiki
 # show line numbers in code blocks
@@ -21,126 +17,68 @@ drawings:
   persist: false
 ---
 
-# linux 页表
-
-多级页表是基于硬件 MMU 实现的功能，从而实现进程隔离
-
----
-
 # 内容
 
-- MMU, va, pa
+- 名词介绍：MMU (Memory Management Unit), va (Virtual address), pa (Physical address)
 - 为什么需要多级页表
 - Linux 的多级页表机制
 - 通过调试 Linux 验证学习中的理解：clangd, qemu+gdb
 
-----
-
-# MMU (Memory Management Unit)
-
-MMU 其中一个功能就是将虚拟地址转换物理地址
-
-- linux 进程访问的地址是虚拟地址（va）
-- 对于 stm32 这些没有 MMU 的 CPU，只能直接使用物理地址
-
-pa 和 va 之间的转换也叫做映射：
-
-- 映射粒度：VA 到 PA 映射的单位大小是页 (Page)，页大小一般为 4K
-- 页帧 (Page Frame) 指物理内存中的一页内存，MMU 的转换就是寻找物理页帧和页内偏移的过程
-- 映射规则：MMU 的映射规则由页表 (Page Table) 来描述，每个进程会维护**一套**页表
-
-进程切换需要切换虚拟地址空间，即切换 PGD 的地址，将其写入 TTBR1 寄存器
+辅助理解的文章：https://www.cnblogs.com/LoyenWang/p/11406693.html
 
 ---
 
 # 虚拟地址和物理地址
 
-arm64 虚拟地址（4K 页表）各个比特位的含义：
+虚拟地址最大的特点就是：地址由操作系统自身决定，地址的值是由软件定义的，并且不同硬件平台的的大多数虚拟地址范围含义相同
+
+<div class="grid grid-cols-2 gap-x-4">
+
+<div>
+
+arm64 虚拟地址（4K 页表）各个比特位的含义（Documentation/arm64/memory.rst）：
+
+| 比特位  | 含义           |
+| ---     | ---            |
+| [11:0]  | in-page offset |
+| [20:12] | pte index      |
+| [29:21] | pmd index      |
+| [38:30] | pud index      |
+| [47:39] | pgd index      |
+| [63]    | TTBR0/1        |
+
+</div>
+
+<div>
+
+物理地址和 CPU 以及内存硬件都有关系，比如 arm64 dts 中就有一个内存用于描述内存起始地址和大小：
 
 ```txt
-+----------------------------------------------------------+
-|63        48|47   39|38   30|29    21|20    12|11        0|
-+----------------------------------------------------------+
- |              |        |       |         |       |
- |              |        |       |         |       v
- |              |        |       |         |   [11:0] in-page offset
- |              |        |       |         +-> [20:12] pte index
- |              |        |       +-----------> [29:21] pmd index
- |              |        +-------------------> [38:30] pud index
- |              +----------------------------> [47:39] pgd index
- +-------------------------------------------> [63] TTBR0/1
+/ {
+    // -m size=1024M 导出的内存节点
+    memory@40000000 {
+        reg = <0x00 0x40000000 0x00 0x40000000>;
+        device_type = "memory";
+    };
+}
 ```
+</div>
 
-由于页表地址也是 4K 对齐的，因此页表项值（即下一级页表的 pa）的低 12 位可以作为其他用途，在 arm64 中称为页表描述符：
-
-```c
-/* Level 3 descriptor */
-#define PTE_VALID       (_AT(pteval_t, 1) << 0)
-#define PTE_USER        (_AT(pteval_t, 1) << 6)  /* AP[1] */
-#define PTE_RDONLY      (_AT(pteval_t, 1) << 7)  /* AP[2] */
-// ...
-```
+</div>
 
 ---
 
-# VA 到 PA 的转化过程（kernel）
+# MMU (Memory Management Unit)
 
-对于 kernel，va 和 pa 都是线性映射，va 转化为 pa 不需要遍历各级页表
+MMU 其中一个功能就是将虚拟地址转换物理地址：提取虚拟地址的比特位，定位页表项并获取其保存的物理地址，找到下级页表或物理页，结合页内偏移就是物理地址
 
-kernel pa 转化需要分为 2 个区域
+虚拟地址转换为物理地址也叫做映射：
 
-- linear map：
-  - va 是 `[PAGE_OFFSET, PAGE_END)`，位于 TTBR1 地址范围的底部
-  - pa 起始地址是 `va - PAGE_OFFSET + PHYS_OFFSET`
-  - va/pa 之间的差值是 `memstart_addr`
-- kernel img：
-  - kernel 各个符号值就是该段的 va，因此也称为 `__pa_symbol`
-  - `pa = va - kimage_voffset = va + __PHYS_OFFSET - pa(_text)`
-  - va/pa 之间的差值是 `kimage_voffset`
-- 2 个 va 区域的分界线是 `PAGE_END`（负数），va 小于这个数为 linear map
+- 映射粒度：VA 到 PA 映射的单位大小是页 (Page)，页大小一般为 4K
+- 页帧 (Page Frame) 指物理内存中的一页内存
+- 页表：这里将页目录（PGD, PUD, PMD）和页表（PTE）都统称页表
 
----
-
-# VA 到 PA 转化的代码（kernel）
-
-```c
-/* __va 只能用于 linear map */
-#define __va(x) ((void *)__phys_to_virt((phys_addr_t)(x)))
-#define __pa(x) __virt_to_phys((unsigned long)(x))
-
-#define __phys_to_virt(x) ((unsigned long)((x)-PHYS_OFFSET) | PAGE_OFFSET)
-#define __virt_to_phys(x)                                                      \
-    ({                                                                         \
-        phys_addr_t __x = (phys_addr_t)(x);                                    \
-        __is_lm_address(__x) ? __lm_to_phys(__x) : __kimg_to_phys(__x);        \
-    })
-
-// 线性地址部分：PAGE_OFFSET = -1^48, PAGE_END = -1^47
-#define __is_lm_address(addr) (((u64)(addr)-PAGE_OFFSET) < (PAGE_END - PAGE_OFFSET))
-#define __lm_to_phys(addr)    (((addr)-PAGE_OFFSET) + PHYS_OFFSET)
-
-// kernel image 部分
-#define __phys_to_kimg(x) ((unsigned long)((x) + kimage_voffset))
-#define __kimg_to_phys(addr) ((addr)-kimage_voffset)
-
-// pa_symbol = va - kimage_voffset，相比 `__pa` 宏少了判断的开销
-#define __pa_symbol(x)          __phys_addr_symbol(x)
-#define __phys_addr_symbol(x)   __kimg_to_phys((phys_addr_t)(x))
-```
-
----
-
-# 思考
-
-<br>
-
-`__va` 不能转化 kernel img pa 为 va？
-
-- kernel img 通过符号表达地址，其地址不是动态的
-- 少有通过 pa 获取 va 场景，通常是用 `pa_symbol` 获取符号的物理地址
-- 若有 pa2va 需求，还有 `__phys_to_kimg` 可以使用
-
-`__phys_to_virt` 没有判断是否处于 linear map？因为 kernel img pa 是由 bootloader 决定的，无法在编译时知道
+<img src="/207305615268480.png" class="h-60" />
 
 ---
 
@@ -149,7 +87,7 @@ kernel pa 转化需要分为 2 个区域
 32 位 linux 使用 2 级页表，到了 64 位时代，就到了 4 级页表，页表的级数增长主要和地址空间大小相关
 
 - 4K 页表的 32 位 linux
-  - 指针大小为 4 字节，一个页表可以有 4k/4 = 1024 个页表项
+  - 指针大小为 4 字节，一个页表可以有 4K/4 = 1024 个页表项
   - 2 级页表能够表达的地址空间就是：1024 * 1024 * 4K = 2^(10+10+12) = 2^32
 - 4K 页表的 64 位 linux
   - 指针大小为 8 字节，一个页表可以有 4k/8 = 512 个页表项
@@ -167,6 +105,70 @@ CONFIG_ARM64_PA_BITS=48
 CONFIG_ARM64_4K_PAGES=y
 # CONFIG_ARM64_VA_BITS_39 is not set
 ```
+
+---
+
+# VA 转化为 PA（kernel）
+
+<div class="grid grid-cols-3 gap-x-2">
+
+<div class="col-span-1">
+Linux 页表定义：
+
+```c
+typedef struct { u64 pte; } pte_t;
+typedef struct { u64 pmd; } pmd_t;
+typedef struct { u64 pud; } pud_t;
+typedef struct { u64 pgd; } pgd_t;
+```
+</div>
+
+<div class="col-span-2">
+`virt_to_kpte` 很好地展示了通过 va 查找每级页表的过程：
+
+```c
+pte_t *virt_to_kpte(unsigned long vaddr) {
+    pmd_t *pmd = pmd_off_k(vaddr);
+    return pmd_none(*pmd) ? NULL : pte_offset_kernel(pmd, vaddr);
+}
+pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address) {
+    return (pte_t *)pmd_page_vaddr(*pmd) + pte_index(address);
+}
+pmd_t *pmd_off_k(unsigned long va) {
+    return pmd_offset(pud_offset(p4d_offset(
+                      pgd_offset_k(va), va), va), va);
+}
+// 这里只展示 pmd_offset，而 pud_offset ... 都是类似的
+pmd_t *pmd_offset(pud_t *pud, unsigned long address) {
+    return (pmd_t *)pud_page_vaddr(*pud) + pmd_index(address);
+}
+// _va 将 kernel pa 转化为 va
+unsigned long pmd_page_vaddr(pmd_t pmd) {
+    return (unsigned long)__va(pmd_page_paddr(pmd));
+}
+phys_addr_t pmd_page_paddr(pmd_t pmd) {
+    return pmd.pmd & PTE_ADDR_MASK; // 0xfffff000
+}
+```
+
+</div>
+
+</div>
+
+---
+
+# 思考
+
+<br>
+
+`__va` 不能转化 kernel img pa 为 va？
+
+- kernel img 通过符号表达地址，其地址不是动态的
+- 少有通过 pa 获取 va 场景，通常是用 `pa_symbol` 获取符号的物理地址
+- 若有 pa2va 需求，还有 `__phys_to_kimg` 可以使用
+
+`__phys_to_virt` 没有判断是否处于 linear map？因为 kernel img pa 是由 bootloader 决定的，无法在编译时知道
+
 
 ---
 
