@@ -24,7 +24,7 @@ drawings:
 - Linux 的多级页表机制
 - 通过调试 Linux 验证学习中的理解：clangd, qemu+gdb
 
-辅助理解的文章：https://www.cnblogs.com/LoyenWang/p/11406693.html
+辅助理解的文章：https://blog.csdn.net/Rong_Toa/article/details/109608341
 
 ---
 
@@ -53,32 +53,74 @@ arm64 虚拟地址（4K 页表）各个比特位的含义（Documentation/arm64/
 
 物理地址和 CPU 以及内存硬件都有关系，比如 arm64 dts 中就有一个内存用于描述内存起始地址和大小：
 
-```txt
+```c
+/* qemu -m size=1024M 导出的内存节点 */
 / {
-    // -m size=1024M 导出的内存节点
+    #size-cells = <0x02>;
+    #address-cells = <0x02>;
     memory@40000000 {
         reg = <0x00 0x40000000 0x00 0x40000000>;
         device_type = "memory";
     };
 }
 ```
+
+解析出来的起始物理地址是 0x40000000，物理内存大小是 0x40000000 (1024M)
 </div>
 
 </div>
 
 ---
 
+# AArch64 Linux 虚拟地址的布局
+
+在 4KB pages + 4 levels (48-bit) 下的 Linux 虚拟地址空间的内存布局
+
+```txt
+Start             End                Size     Use
+-----------------------------------------------------------------------
+0000000000000000  0000ffffffffffff   256TB    user
+ffff000000000000  ffff7fffffffffff   128TB    kernel logical memory map
+[ffff600000000000 ffff7fffffffffff]   32TB    [kasan shadow region]
+ffff800000000000  ffff800007ffffff   128MB    bpf jit region
+ffff800008000000  ffff80000fffffff   128MB    modules
+ffff800010000000  fffffbffefffffff   124TB    vmalloc
+fffffbfff0000000  fffffbfffdffffff   224MB    fixed mappings (top down)
+fffffbfffe000000  fffffbfffe7fffff     8MB    [guard region]
+fffffbfffe800000  fffffbffff7fffff    16MB    PCI I/O space
+fffffbffff800000  fffffbffffffffff     8MB    [guard region]
+fffffc0000000000  fffffdffffffffff     2TB    vmemmap
+fffffe0000000000  ffffffffffffffff     2TB    [guard region]
+```
+
+带中括号的是可选的内存区域
+
+---
+
 # MMU (Memory Management Unit)
 
-MMU 其中一个功能就是将虚拟地址转换物理地址：提取虚拟地址的比特位，定位页表项并获取其保存的物理地址，找到下级页表或物理页，结合页内偏移就是物理地址
+MMU 最重要功能就是将虚拟地址转换物理地址：提取虚拟地址的比特位，定位页表项并获取其保存的物理地址，找到下级页表或物理页，结合页内偏移就是物理地址；**MMU 就是将这个过程用硬件实现（类比 ichips）**
 
-虚拟地址转换为物理地址也叫做映射：
+虚拟地址与物理地址的转换也叫做映射：
 
 - 映射粒度：VA 到 PA 映射的单位大小是页 (Page)，页大小一般为 4K
 - 页帧 (Page Frame) 指物理内存中的一页内存
-- 页表：这里将页目录（PGD, PUD, PMD）和页表（PTE）都统称页表
+- 页表：这里将页目录（PGD, PUD, PMD）和页表（PTE）都统称页表（**注意区分页和页表，页表是特殊的页**）
 
+<div class="grid grid-cols-2 gap-x-2">
+<div>
 <img src="/207305615268480.png" class="h-60" />
+</div>
+<div>
+
+从软件的角度解释页表：
+
+- 一个页表相当于一个数组
+- 数组每个项保存了下一级页表的起始物理地址
+- 虚拟地址的所有比特位构成了数组的索引和页内偏移
+
+</div>
+</div>
 
 ---
 
@@ -142,12 +184,12 @@ pmd_t *pmd_off_k(unsigned long va) {
 pmd_t *pmd_offset(pud_t *pud, unsigned long address) {
     return (pmd_t *)pud_page_vaddr(*pud) + pmd_index(address);
 }
-// _va 将 kernel pa 转化为 va
+// __va 将 kernel pa 转化为 va
 unsigned long pmd_page_vaddr(pmd_t pmd) {
     return (unsigned long)__va(pmd_page_paddr(pmd));
 }
 phys_addr_t pmd_page_paddr(pmd_t pmd) {
-    return pmd.pmd & PTE_ADDR_MASK; // 0xfffff000
+    return pmd.pmd & PTE_ADDR_MASK; // PTE_ADDR_MASK=0xfffff000
 }
 ```
 
@@ -157,18 +199,48 @@ phys_addr_t pmd_page_paddr(pmd_t pmd) {
 
 ---
 
+# VA 转化为 PA（kernel）
+
+kernel va 需要分为 2 个区域
+
+| 区域名     | va                        | va/pa 关系                        |
+| ---        | ---                       | ---                               |
+| linear map | `[PAGE_OFFSET, PAGE_END)` | `pa=va-PAGE_OFFSET+memstart_addr` |
+| kernel img | `[_text, _end]`           | `pa=va-kimage_voffset`            |
+
+```c
+// PAGE_OFFSET=-(1<<48), PAGE_END=-(1^47)
+#define __va(x) ((void *)__phys_to_virt((phys_addr_t)(x)))
+#define __pa(x) __virt_to_phys((unsigned long)(x))
+
+#define __virt_to_phys(x) ({ \
+    phys_addr_t __x = (phys_addr_t)(x); \
+    __is_lm_address(__x) ? __lm_to_phys(__x) : __kimg_to_phys(__x); \
+})
+#define __phys_to_virt(x) ((unsigned long)((x)-PHYS_OFFSET) | PAGE_OFFSET)
+
+#define __is_lm_address(addr) ((addr - PAGE_OFFSET) < (PAGE_END - PAGE_OFFSET))
+#define __lm_to_phys(addr) (addr - PAGE_OFFSET + PHYS_OFFSET)
+
+#define __phys_to_kimg(x)       ((unsigned long)((x) + kimage_voffset))
+#define __kimg_to_phys(addr)    ((addr)-kimage_voffset)
+```
+
+---
+
 # 思考
 
-<br>
+1. `__va` 不能转化 kernel img pa 为 va？
+    - kernel img 通过符号表达地址，其地址不是动态的；少有通过 pa 获取 va 场景，通常是用 `pa_symbol` 获取符号的物理地址；若有 pa2va 需求，还有 `__phys_to_kimg` 可以使用
 
-`__va` 不能转化 kernel img pa 为 va？
+2. `__phys_to_virt` 没有判断是否处于 linear map？
+    - 因为 kernel img pa 是由 bootloader 决定的，无法在编译时知道
 
-- kernel img 通过符号表达地址，其地址不是动态的
-- 少有通过 pa 获取 va 场景，通常是用 `pa_symbol` 获取符号的物理地址
-- 若有 pa2va 需求，还有 `__phys_to_kimg` 可以使用
+3. `__pa`/`__va` 最后展开的转换中都有一个变量
+    - 每个硬件的起始物理地址和大小都是不同的，需要从 dts 读取，以及 bootloader 加载 kernel img 的物理地址也是不同的，需要使用变量保存这些动态的值
+    - va 区间是编译时确定的
 
-`__phys_to_virt` 没有判断是否处于 linear map？因为 kernel img pa 是由 bootloader 决定的，无法在编译时知道
-
+4. `pmd_offset` 需要使用 `pud_page_vaddr` 转化为 va？因为 kernel 中的指针是 va，因为只有 va 才能解引用，获取地址保存的值；而且要访问页表 va，页表本身也必须先要映射，这个是通过 fixmap 完成的
 
 ---
 
@@ -198,99 +270,31 @@ unsigned long pte_index(unsigned long address) { return (address >> PAGE_SHIFT) 
 
 ---
 
-# 获取页表项值
-
-页表项值 (`pxx_page_paddr` 宏)，代码中只能访问虚拟地址（`pxx_page_vaddr` 宏），但是可以往虚拟地址写入物理地址
-
-```c
-phys_addr_t p4d_page_paddr(p4d_t p4d) {
-    return __p4d_to_phys(p4d);
-}
-phys_addr_t pud_page_paddr(pud_t pud) {
-    return __pud_to_phys(pud); // __pud_to_phys 本质就是 pud_t.pud
-}
-phys_addr_t pmd_page_paddr(pmd_t pmd) {
-    return __pmd_to_phys(pmd);
-}
-
-// pxx_page_vaddr 比较常用，因为代码读取或写入页表项都只能通过 va 进行
-#define pgd_page_vaddr(pgd)   (p4d_page_vaddr((p4d_t){ pgd }))
-unsigned long p4d_page_vaddr(p4d_t p4d) {
-    return (unsigned long)__va(p4d_page_paddr(p4d));
-}
-unsigned long pmd_page_vaddr(pmd_t pmd) {
-    return (unsigned long)__va(pmd_page_paddr(pmd));
-}
-unsigned long pud_page_vaddr(pud_t pud) {
-    return (unsigned long)__va(pud_page_paddr(pud));
-}
-```
-
----
-
 # 页表项
 
 获取页表项 va 有多种接口，不同接口的输入参数不同，而且名字风格也有不同：
 
-| 接口名                      | 输入参数                   |
-| ---                         | ---                        |
-| `[pgd,pud,pmd]_offset`      | 上级页表项和 va            |
-| `pgd_offset_pgd`            | pgd 首地址和 va            |
-| `pgd_offset_k`              | kernel va                  |
-| `pmd_off`                   | mm 和 va                   |
-| `pmd_off_k`                 | kernel va                  |
-| `virt_to_kpte`              | kernel va                  |
-| `pte_offset_kernel()`       | 上级页表项 pmd 和 va       |
+| 接口名                 | 输入参数             |
+| ---                    | ---                  |
+| `[pgd,pud,pmd]_offset` | 上级页表项和 va      |
+| `pgd_offset_pgd`       | pgd 首地址和 va      |
+| `pgd_offset_k`         | kernel va            |
+| `pmd_off`              | mm 和 va             |
+| `pmd_off_k`            | kernel va            |
+| `virt_to_kpte`         | kernel va            |
+| `pte_offset_kernel`    | 上级页表项 pmd 和 va |
 
 ---
 
-# 页表项相关代码
+# 页表描述符
 
-这里只有 pmd 和 pte 的代码，其他参考源码进行类比即可
+页表的起始地址是 4K 对齐的，并且由于物理地址空间非常大，因此每级页表项值的高位和低 12 位都可以用作页表描述符，用于描述页表的属性；页表描述符既有硬件定义也有软件定义的比特位
 
-pmd:
+level 0-2 (PGD, PMD, PTE) 的页表描述符：
+<img src="/25394006615096.png" class="h-60" />
 
-```c
-// 可以用于 userspace 和 kernel va
-pmd_t *pmd_offset(pud_t *pud, unsigned long address) { return (pmd_t *)pud_page_vaddr(*pud) + pmd_index(address); }
-// 可以用于 userspace 和 kernel va
-pmd_t *pmd_off(struct mm_struct *mm, unsigned long va) { return pmd_offset(pud_offset(p4d_offset(pgd_offset(mm, va), va), va), va); }
-// 只能用于 kernel va
-pmd_t *pmd_off_k(unsigned long va) { return pmd_offset(pud_offset(p4d_offset(pgd_offset_k(va), va), va), va); }
-```
-
-pte:
-
-```c
-pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address) {
-    return (pte_t *)pmd_page_vaddr(*pmd) + pte_index(address);
-}
-pte_t *virt_to_kpte(unsigned long vaddr) {
-    pmd_t *pmd = pmd_off_k(vaddr);
-    return pmd_none(*pmd) ? NULL : pte_offset_kernel(pmd, vaddr);
-}
-```
-
----
-
-# 页表项相关代码
-
-其他 2 个宏：
-
-`pxx_offset_kimg`：
-
-- 输入上级页表项和 va，也是返回页表项 va
-- 但是只能用于处在 kernel img 的页表如 `bm_pud`（用到了 `__phys_to_kimg`）
-
-`pxx_offset_phys`：输入上级页表项和 va，但是返回页表项 pa
-
-```c
-#define pmd_offset_kimg(dir, addr)                                             \
-    ((pmd_t *)__phys_to_kimg(pmd_offset_phys(dir, addr)))
-
-#define pmd_offset_phys(dir, addr)                                             \
-    (pud_page_paddr(READ_ONCE(*(dir))) + pmd_index(addr) * sizeof(pmd_t))
-```
+level 3 (PTE) 的页表描述符：
+<img src="/163230197826004.png" class="h-14" />
 
 ---
 
@@ -372,4 +376,4 @@ aarch64-linux-gnu-gdb vmlinux -ex "target remote:1234" -tui
 利用 `scripts/clang-tools/gen_compile_commands.py` 脚本生成 `compile_commands.json`
 
 - clangd 会根据 `compile_commands.json` 生成代码索引
-- 该脚本在高版本的 kernel 源码树中，但在低版本的源码也可以工作
+- 该脚本保存在高版本的 kernel 源码树中，但在低版本的源码也可以工作
