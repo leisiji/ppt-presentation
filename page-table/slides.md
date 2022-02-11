@@ -30,7 +30,7 @@ drawings:
 
 # 虚拟地址和物理地址
 
-虚拟地址最大的特点就是：地址由操作系统自身决定，地址的值是由软件定义的，并且不同硬件平台的的大多数虚拟地址范围含义相同
+虚拟地址最大的特点就是：地址由操作系统自身决定，地址的值是由软件定义的，并且同一架构下的不同硬件平台的的大多数虚拟地址范围含义相同
 
 <div class="grid grid-cols-2 gap-x-4">
 
@@ -109,7 +109,7 @@ MMU 最重要功能就是将虚拟地址转换物理地址：提取虚拟地址�
 
 <div class="grid grid-cols-2 gap-x-2">
 <div>
-<img src="/207305615268480.png" class="h-60" />
+<img src="/207305615268480.png" class="h-55" />
 </div>
 <div>
 
@@ -155,6 +155,7 @@ CONFIG_ARM64_4K_PAGES=y
 <div class="grid grid-cols-3 gap-x-2">
 
 <div class="col-span-1">
+
 Linux 页表定义：
 
 ```c
@@ -163,10 +164,14 @@ typedef struct { u64 pmd; } pmd_t;
 typedef struct { u64 pud; } pud_t;
 typedef struct { u64 pgd; } pgd_t;
 ```
+
+<br>
+
+右边的 `virt_to_kpte` (获取 va 对应的 pte 页表项)，很好地展示了通过 va 查找每级页表的过程：
+
 </div>
 
 <div class="col-span-2">
-`virt_to_kpte` 很好地展示了通过 va 查找每级页表的过程：
 
 ```c
 pte_t *virt_to_kpte(unsigned long vaddr) {
@@ -177,14 +182,14 @@ pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address) {
     return (pte_t *)pmd_page_vaddr(*pmd) + pte_index(address);
 }
 pmd_t *pmd_off_k(unsigned long va) {
-    return pmd_offset(pud_offset(p4d_offset(
-                      pgd_offset_k(va), va), va), va);
+    return pmd_offset(pud_offset(
+                      p4d_offset(pgd_offset_k(va), va), va), va);
 }
 // 这里只展示 pmd_offset，而 pud_offset ... 都是类似的
 pmd_t *pmd_offset(pud_t *pud, unsigned long address) {
     return (pmd_t *)pud_page_vaddr(*pud) + pmd_index(address);
 }
-// __va 将 kernel pa 转化为 va
+// __va 将 linear map pa 转化为 va
 unsigned long pmd_page_vaddr(pmd_t pmd) {
     return (unsigned long)__va(pmd_page_paddr(pmd));
 }
@@ -210,17 +215,17 @@ kernel va 需要分为 2 个区域
 
 ```c
 // PAGE_OFFSET=-(1<<48), PAGE_END=-(1^47)
-#define __va(x) ((void *)__phys_to_virt((phys_addr_t)(x)))
-#define __pa(x) __virt_to_phys((unsigned long)(x))
+#define __va(x)                 ((void *)__phys_to_virt((phys_addr_t)(x)))
+#define __pa(x)                 __virt_to_phys((unsigned long)(x))
 
 #define __virt_to_phys(x) ({ \
     phys_addr_t __x = (phys_addr_t)(x); \
     __is_lm_address(__x) ? __lm_to_phys(__x) : __kimg_to_phys(__x); \
 })
-#define __phys_to_virt(x) ((unsigned long)((x)-PHYS_OFFSET) | PAGE_OFFSET)
+#define __phys_to_virt(x)       ((unsigned long)((x)-PHYS_OFFSET) | PAGE_OFFSET)
 
-#define __is_lm_address(addr) ((addr - PAGE_OFFSET) < (PAGE_END - PAGE_OFFSET))
-#define __lm_to_phys(addr) (addr - PAGE_OFFSET + PHYS_OFFSET)
+#define __is_lm_address(addr)   ((addr - PAGE_OFFSET) < (PAGE_END - PAGE_OFFSET))
+#define __lm_to_phys(addr)      (addr - PAGE_OFFSET + PHYS_OFFSET)
 
 #define __phys_to_kimg(x)       ((unsigned long)((x) + kimage_voffset))
 #define __kimg_to_phys(addr)    ((addr)-kimage_voffset)
@@ -246,7 +251,7 @@ kernel va 需要分为 2 个区域
 
 # Linux 的多级页表机制
 
-Linux 的多级页表机制是基于硬件的，但是业界对 CPU 都达成了公式，都在 MMU 实现了多级页表的机制
+Linux 的多级页表机制是基于硬件的，但是业界对 CPU 都达成了共识，都在 MMU 实现了多级页表的机制
 
 Linux 的 4 级页表名称：PGD, PUD, PMD, PTE
 
@@ -283,6 +288,64 @@ unsigned long pte_index(unsigned long address) { return (address >> PAGE_SHIFT) 
 | `pmd_off_k`            | kernel va            |
 | `virt_to_kpte`         | kernel va            |
 | `pte_offset_kernel`    | 上级页表项 pmd 和 va |
+
+带 k 的都是 kernel va/pa，kimg 则是只针对 kernel img 区间
+
+---
+
+# 获取页表项
+
+获取页表项的 API 会经常出现在内存子系统的代码，因此要对接口名比较熟悉，并且理解接口的实现
+
+获取 pgd 页表项：kernel 都共用一个地址空间，因此不需要使用 mm 作为输入参数，直接使用 `init_mm`
+
+```c
+#define pgd_offset(mm, address) pgd_offset_pgd((mm)->pgd, (address))
+#define pgd_offset_k(address)   pgd_offset(&init_mm, (address))
+pgd_t *pgd_offset_pgd(pgd_t *pgd, unsigned long address) { return (pgd + pgd_index(address)); }
+```
+
+获取 pmd 页表项：
+```c
+pmd_t *pmd_off(struct mm_struct *mm, unsigned long va) {
+    return pmd_offset(pud_offset(p4d_offset(pgd_offset(mm, va), va), va), va);
+}
+pmd_t *pmd_off_k(unsigned long va) {
+    return pmd_offset(pud_offset(p4d_offset(pgd_offset_k(va), va), va), va);
+}
+// 获取 pmd 页表项的 pa；pud_page_paddr 是获取页表项的值，因为页表项保存的是物理地址
+#define pmd_offset_phys(dir, addr)  (pud_page_paddr(READ_ONCE(*(dir))) + pmd_index(addr) * sizeof(pmd_t))
+phys_addr_t pud_page_paddr(pud_t pud) { return __pud_to_phys(pud); }
+```
+
+---
+
+# kernel img 页表
+
+kernel img 区域是编译时静态生成的，它是被 bootloader 加载到物理内存，在初始化阶段只有静态分配的内存才能用作页表
+
+```c
+static pte_t bm_pte[PTRS_PER_PTE] __page_aligned_bss;
+static pmd_t bm_pmd[PTRS_PER_PMD] __page_aligned_bss __maybe_unused;
+static pud_t bm_pud[PTRS_PER_PUD] __page_aligned_bss __maybe_unused;
+
+#define pmd_offset_kimg(dir, addr)   ((pmd_t *)__phys_to_kimg(pmd_offset_phys(dir, addr)))
+```
+
+kernel img 页表在 head.S 已经被映射过，可以直接用变量名（va）来访问，但是对于其他地址的内存，访问页表还需要先对页表进行映射，fixmap 的其中一个功能就是用来这个
+
+```c
+void init_pte(pmd_t *pmdp, unsigned long addr, unsigned long end,
+              phys_addr_t phys, pgprot_t prot)
+{
+    pte_t *ptep = pte_set_fixmap_offset(pmdp, addr); // 先使用 fixmap 对 pte 一个页表映射，返回 pte 起始 va
+    do {
+        set_pte(ptep, pfn_pte(__phys_to_pfn(phys), prot)); // 映射完后才能使用 va 设置 pte
+        phys += PAGE_SIZE;
+    } while (ptep++, addr += PAGE_SIZE, addr != end);
+    pte_clear_fixmap(); // 完成访问后，需要清除映射（这里没有传入参数，因为 fixmap 每次只映射 1 页）
+}
+```
 
 ---
 
