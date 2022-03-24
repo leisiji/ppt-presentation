@@ -18,7 +18,7 @@ drawings:
   persist: false
 ---
 
-# ARMv8 架构学习
+# ARMv8 指令学习
 
 ARMv8 是 arm 的 64 位指令集
 
@@ -35,6 +35,10 @@ ARMv8 是 arm 的 64 位指令集
   - Cache Miss
 - 寄存器
 - ARMv8 部分指令的介绍
+
+参考：
+
+https://cs140e.sergio.bz/docs/ARMv8-A-Programmer-Guide.pdf
 
 ---
 
@@ -76,7 +80,7 @@ Cache 分类：
 <div>
 
 - Point of Coherency (PoC)：
-  - 系统中所有观察者（如 CPU、DMA engine）都能看到同样的内存值的位置
+  - 系统中所有观察者（如 CPU, DMA engine）都能看到同样的内存值的位置
   - 由于 DMA controller 不通过 cache 访问内存，因此 PoC 只能是内存了
 - Point of Unification (PoU)：
   - 以一个 PE 为视角，其执行的指令或 D-cache 或 TLB 都能看到相同的内存值
@@ -139,11 +143,12 @@ Cache Miss：内存没有缓存到 Cache 中，需要先从内存读取到 Cache
 
 ## ARMv8 寄存器
 
-- R0-R30：31 个通用器，X0-X30 以 64 位模式访问，W0-W30 以 32 位模式访问；其中 X30 通常用作 link register
+- R0-R30：31 个通用器，X0-X30 以 64 位模式访问，W0-W30 以 32 位模式访问
+  - 其中 X30 通常用作 link register，X29 通常用作 frame pointer
 - SP：Stack Pointer register
 - PC：Program Counter，当前指令的地址，程序无法直接写入 PC
 
-PSTATE 的部分 fields：
+PSTATE (process state)，部分指令会作用到 PSTATE，其部分 fields 如下：
 
 - Condition flag：*N* - Negative flag, *Z* - Zero flag, *C* - Carry flag, *V* - Overflow flag
 - 执行状态控制：*IL* - Illegal Execution state bit, *EL* - Current Exception level
@@ -175,7 +180,7 @@ adr_l   x0, boot_args
 stp     x21, x1, [x0]      /* 寄存器寻址 */
 stp     x2, x3, [x0, #16]  /* 寄存器相对寻址 */
 /* 跳转 __primary_switched */
-ldr     x8, =__primary_switched
+ldr     x8, =__primary_switched /* Literal */
 adrp    x0, __PHYS_OFFSET /* x0 作为参数 */
 blr     x8
 ```
@@ -247,7 +252,7 @@ STR, Store Register
 <div>
 
 ```asm
-/* ldr_l 解决了 `ldr Xd, label` 寻址范围只有 1MB 的问题 */
+/* ldr_l 解决了 ldr Xd, label 寻址范围只有 1MB 的问题 */
 .macro  ldr_l, dst, sym, tmp=
 adrp    \dst, \sym
 ldr     \dst, [\dst, :lo12:\sym]
@@ -317,9 +322,9 @@ MSR 分为 immediate 和 register
 
 ## ARMv8 分支指令
 
-b 指令，Z 是指 PSTATE.Zero：
+b 指令
 
-- `beq label` Z=0 跳转；`bne label` Z != 0 跳转
+- `beq label` Z=0 跳转；`bne label` Z != 0 跳转；Z 是指 PSTATE.Zero
 - 跳转指令的 `b.ne 1b` 和 `b.ge 1f` 分别表示 backward 1 和 forward 1
 - `BL <label>`：跳转到相对 PC 偏移的地址，并将 x30 设置为 PC+4，跳转范围是 +/-128MB
 - `BLR <Xn>`：跳转到寄存器保存的地址，并将 x30 设置为 PC+4
@@ -335,27 +340,59 @@ b 指令，Z 是指 PSTATE.Zero：
 
 ---
 
-## 综合的例子
+### 综合的例子
+
+<div class="grid grid-cols-2 gap-x-4">
+
+<div>
+
+```c
+static int add(int a, int b) { return a + b; }
+
+int main (int argc, char *argv[])
+{
+    int a = 1, b = 2;
+    int c = add(a, b);
+    return 0;
+}
+```
+
+推荐 https://godbolt.org/ 看 C/C++ 对应的汇编
+
+栈的分布从栈顶到栈底：
+
+fp (8), lr (8), sp (8), argv (8), argc (4), c (4), b (4), a (4)
+
+</div>
+
+<div>
 
 ```asm
-/* tbl: 页表的地址
- * rtbl: 下一级页表的地址 (通常是 tbl + PAGE_SIZE) */
-.macro populate_entries, tbl, rtbl, index, eindex, flags, inc, tmp1
-.Lpe\@:
-    mov \tmp1, \rtbl                  /* tmp1 = rtbl (table entry) */
-    orr \tmp1, \tmp1, \flags          /* tmp1 = tmp1 | flags */
-    str \tmp1, [\tbl, \index, lsl #3] /* 将下一级页表项和 flags 写入当前页表项，并移动到下一个页表项 */
-    add \rtbl, \rtbl, \inc            /* 下一级页表移动到下一个页表项 */
-    add \index, \index, #1
-    cmp \index, \eindex               /* index >= eindex 结束循环 */
-    b.ls    .Lpe\@
-.endm
-
-/*
- *  tbl: 页表的地址
- *  rtbl: 索引为 1 页表的页表项地址 (通常是 tbl + PAGE_SIZE)
- */
-/* 先通过 [vstart, vend] 算出页表的 istart 和 iend，带反斜杠都是通用寄存器 */
-compute_indices \vstart, \vend, #PGDIR_SHIFT, \pgds, \istart, \iend, \count
-populate_entries \tbl, \rtbl, \istart, \iend, #PMD_TYPE_TABLE, #PAGE_SIZE, \tmp
+/* 将 fp, lr 入栈；Pre-indexed, sp = sp - 48 */
+stp x29, x30, [sp, #-48]!
+mov x29, sp /* fp 指向栈顶 */
+/* argc, argv 入栈；Base register，sp 不变 */
+str w0, [sp, #28]
+str x1, [sp, #16]
+/* a = 1 */
+mov w0, #0x1
+str w0, [sp, #44]
+/* b = 1 */
+mov w0, #0x2
+str w0, [sp, #40]
+/* x0 和 x1 传递参数，调用 add */
+ldr w1, [sp, #40]
+ldr w0, [sp, #44]
+bl  714 <add>
+/* 将 add 返回值写入 c */
+str w0, [sp, #36]
+/* 返回值为 0 */
+mov w0, #0x0
+/* 恢复 fp, lr，Post-indexed，sp = sp + 48 */
+ldp x29, x30, [sp], #48
+ret
 ```
+
+</div>
+
+</div>
