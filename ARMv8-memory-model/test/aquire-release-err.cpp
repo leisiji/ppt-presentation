@@ -8,7 +8,7 @@ using namespace std;
 
 int main() {
     vector<thread> v;
-    for (int j = 0; j < 100; j++) {
+    for (int j = 0; j < 10000; j++) {
         v.push_back(thread([] () {
             atomic_bool x(false), y(false);
             atomic_int64_t z(0);

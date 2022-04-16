@@ -21,7 +21,7 @@ drawings:
   persist: false
 ---
 
-# ARMv8 内存模型
+# C++ 内存模型
 
 ---
 
@@ -29,6 +29,11 @@ drawings:
 
 - C 的 volatile 关键字
 - Memory Order 内存顺序 (所有架构都适用的模型)
+  - Relaxed
+  - Aquire-Release
+  - Release-Consume
+  - Consistent
+- 使用 Memory-Order 的例子：AOSP 的智能指针
 
 参考
 
@@ -38,15 +43,17 @@ drawings:
 
 ---
 
-# C 的 volatile 关键字
+## C 的 volatile 关键字
 
 <div class="grid grid-cols-2 gap-x-4">
 
 <div>
 
+volatile 的作用只有一个：告诉编译器不要进行优化
+
 ```c
-/* 不加 volatile，gcc 开启 -O2 会发现 thread2 永远无法退出
- * clang 开启 -O2 不会出现下面的情况 */
+// 不加 volatile，gcc 开启 -O2 会发现 thread2 永远无法退出
+// clang 开启 -O2 不会出现下面的情况
 static volatile int thread_var = 1;
 void *thread1(void *arg) {
     sleep(1);
@@ -72,15 +79,49 @@ int main(int argc, char *argv[]) {
 
 <div>
 
-volatile 作用：
+还常用于内联汇编：
 
-- 只在编译器层面优化，告诉编译器不要从寄存器中读取变量值
-- 无法防止多线程同时写变量的问题，而且看出只能用于一个线程写另一个线程读的情况
-- 使用情况非常狭窄，因此要避免使用 `volatile` (linux 内核中禁止使用 volatile 关键字)
+```c
+// rdtsc (x86) 读取时间戳，若没有 volatile，在 -O3 下
+// 编译器会认为第二个 asm 返回同样的值而把其去掉
+int main(int argc, char *argv[])
+{
+    uint64_t msr;
+    asm volatile("rdtsc\n\t"
+                 "shl $32, %%rdx\n\t"
+                 "or %%rdx, %0"
+                 : "=a"(msr)
+                 :
+                 : "rdx");
+    printf("msr: %llx\n", msr);
+    asm volatile("rdtsc\n\t"
+                 "shl $32, %%rdx\n\t"
+                 "or %%rdx, %0"
+                 : "=a"(msr)
+                 :
+                 : "rdx");
+    printf("msr: %llx\n", msr);
+    return 0;
+}
+```
 
 </div>
 
 </div>
+
+---
+
+## C 的 volatile 关键字
+
+以下 2 个宏告诉编译器要操作内存，不要将变量优化为寄存器操作；常被用于读写寄存器：
+
+```c
+/* include/asm-generic/rwonce.h */
+#define READ_ONCE(x)        (*(const volatile __unqual_scalar_typeof(x) *)&(x))
+#define WRITE_ONCE(x, val)  do { *(volatile typeof(x) *)&(x) = (val); } while (0)
+```
+
+但是，要避免使用 `volatile` (linux 内核中禁止使用 volatile)，因为其作用仅限于写内联汇编和寄存器操作时用到，而这些操作都有现成的接口提供，不需要自己实现
 
 ---
 
@@ -183,11 +224,13 @@ int main(int argc, char *argv[])
 
 <div class="grid grid-cols-2 gap-x-4">
 
-<div class="text-sm">
+<div>
 
 - 若线程 A 中的原子写是 `memory_order_release` ，线程 B 同一变量的原子读是 `memory_order_acquire`
 - A 对该变量原子写之前的所有内存写入（非原子及 relax），在线程 B 都是可见的，B 可以读取到 A 写入的值
 - 形象一点，把 aquire-release 看作加锁的临界区，临界区内的代码不会跑出 lock-unlock 的边界
+
+左边的例子使用了 Relaxed，因此导致了错误，正确的应该使用 Aquire-Release
 
 </div>
 
@@ -245,6 +288,8 @@ h2 {
 - 则 A 对该变量原子写之前的所有内存写入（**非原子及 relax**），对于依赖线程 B 同一变量的原子读才是可见的
 - 即 B 中依赖原子读的函数或操作符才可以看到 A 写入内存的内容
 
+解决左边的问题就是将 order 参数全部删除，因为默认的无参数重载使用的是 `memory_order_seq_cst`
+
 </div>
 
 <div>
@@ -284,10 +329,15 @@ int main() {
 
 <div>
 
-<div class="text-sm">
+<div>
 
-- 每个处理器的执行顺序和代码中的顺序（program order）一样
+- 每个处理器的执行顺序和代码中的顺序一样
 - 所有处理器都只能看到**一种执行顺序**
+
+注意，aquire/release 只对同一线程的变量有同步作用，左边的代码就是反例：
+
+- 不同核看到的操作结果不同，在 thread c 可能看到是先 x 后 y，但在 thread d 可能是先 y 后 x
+- 因为 x 和 y 是在不同线程的 release，没有顺序关系，若在同一线程可以 assert 成立
 
 </div>
 
@@ -296,7 +346,29 @@ int main() {
 <div>
 
 ```cpp
+atomic_bool x(false), y(false);
+atomic_int64_t z(0);
 
+void write_x() { x.store(true, memory_order_release); }
+void write_y() { y.store(true, memory_order_release); }
+void read_x_then_y() {
+    while (!x.load(memory_order_acquire)) ;
+    if (y.load(memory_order_acquire)) ++z;
+}
+void read_y_then_x() {
+    while (!y.load(memory_order_acquire)) ;
+    if (x.load(memory_order_acquire)) ++z;
+}
+int main()
+{
+    thread a(write_x);
+    thread b(write_y);
+    thread c(read_x_then_y);
+    thread d(read_y_then_x);
+    a.join(); b.join(); c.join(); d.join();
+    assert(z.load() != 0);
+}
+// 最后的断言可能失败，因为 x 和 y 是在不同的线程
 ```
 
 </div>
