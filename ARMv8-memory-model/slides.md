@@ -374,3 +374,71 @@ int main()
 </div>
 
 </div>
+
+---
+
+## AOSP 的智能指针 (强弱引用的递减都使用了 Aquire-Release)
+
+<div class="grid grid-cols-2 gap-x-4 text-sm">
+
+<div>
+
+```cpp
+/* 强引用 */
+void RefBase::incStrong(const void* id) const
+{
+    weakref_impl* const refs = mRefs;
+    refs->incWeak(id);
+
+    // 由于有条件判断的依赖，这里的两个原子加减不会乱序
+    const int32_t c =
+        refs->mStrong.fetch_add(1, memory_order_relaxed);
+    if (c == INITIAL_STRONG_VALUE)
+        refs->mStrong.fetch_sub(INITIAL_STRONG_VALUE,
+                                memory_order_relaxed);
+}
+void RefBase::decStrong(const void* id)
+{
+    weakref_impl* const refs = mRefs;
+
+    const int32_t c =
+        refs->mStrong.fetch_sub(1, memory_order_release);
+    if (c == 1) {
+        atomic_thread_fence(memory_order_acquire);
+        delete this;
+    }
+    refs->decWeak(id); /* mRefs 和 this 不是在同一块内存 */
+}
+```
+
+</div>
+
+<div>
+
+```cpp
+/* 弱引用 */
+void RefBase::weakref_type::incWeak(const void *id)
+{
+    weakref_impl *const impl =
+        static_cast<weakref_impl *>(this);
+    const int32_t c =
+        impl->mWeak.fetch_add(1, memory_order_relaxed);
+}
+void RefBase::weakref_type::decWeak(const void *id)
+{
+    weakref_impl *const impl =
+        static_cast<weakref_impl *>(this);
+    const int32_t c =
+        impl->mWeak.fetch_sub(1, memory_order_release);
+    if (c != 1)
+        return;
+    atomic_thread_fence(memory_order_acquire);
+    // 个人感觉可以改为 consume，因为这里有 if 的数据依赖
+    if (impl->mStrong.load(memory_order_relaxed == 0)
+        delete impl;
+}
+```
+
+</div>
+
+</div>
