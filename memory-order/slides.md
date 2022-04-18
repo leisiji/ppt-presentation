@@ -113,7 +113,7 @@ int main(int argc, char *argv[])
 
 ## C 的 volatile 关键字
 
-以下 2 个宏告诉编译器要操作内存，不要将变量优化为寄存器操作；常被用于读写寄存器：
+以下 2 个宏告诉编译器要操作内存，不要将变量优化为寄存器操作，并且不要调整读写变量的顺序；常被用于读写寄存器：
 
 ```c
 /* include/asm-generic/rwonce.h */
@@ -121,7 +121,7 @@ int main(int argc, char *argv[])
 #define WRITE_ONCE(x, val)  do { *(volatile typeof(x) *)&(x) = (val); } while (0)
 ```
 
-但是，要避免使用 `volatile` (linux 内核中禁止使用 volatile)，因为其作用仅限于写内联汇编和寄存器操作时用到，而这些操作都有现成的接口提供，不需要自己实现
+但是，要避免使用 `volatile` (linux 内核中禁止使用 volatile)，因为其作用仅限于写内联汇编和寄存器操作时用到，而这些操作都有现成的接口提供，不需要自己实现；而且 volatile 无法解决多线程的竞争问题
 
 ---
 
@@ -137,9 +137,9 @@ CPU 的顺序模型：
 
 内存序的术语：
 
-- **Sequenced-Before**：表示单线程之间的先后顺序和操作结果的可见性；如果 A sequenced-before B，除了表示 A 在 B 之前，还表示 A 的结果对 B 可见（core 有 L1 Cache，别的线程不一定能读取到最新的变量值）
-- **Happens-Before**：表示不同线程之间的操作先后顺序和操作结果的可见性；如果 A happens-before B，则 A 的内存状态将在 B 执行之前就可见
-- **Synchronizes-With**：强调的是变量被修改之后的传播关系（propagate），即如果一个线程修改某变量的之后的结果能被其它线程可见；显然，synchronizes-with 一定是满足 happens-before
+- **Sequenced-Before**：表示单线程之间的先后顺序和操作结果的可见性；如果 A sequenced-before B，除了表示 A 在 B 之前，还表示 A 的结果对 B 可见（有 L1 Cache，别的线程不一定能读到新的变量值）
+- **Happens-Before**：表示不同线程之间的操作先后顺序和操作结果的可见性；如果 A happens-before B，则 A 的结果将在 B 执行之前就可见
+- **Synchronizes-With**：强调的是变量被修改之后的传播关系，即如果一个线程修改某变量的之后的结果能被其它线程可见
 
 ---
 
@@ -160,8 +160,7 @@ CPU 的顺序模型：
 
 ## Relaxed
 
-- 仅要求一个变量的读写是原子操作
-- 在单个线程内，该变量的所有原子操作是顺序进行的
+- 仅要求一个变量的读写是原子操作；在单个线程内，该变量的所有原子操作是顺序进行的
 - 不同线程之间针对该变量的访问操作先后顺序不能得到保证，即有可能乱序
 
 <div class="grid grid-cols-2 gap-x-4">
@@ -181,7 +180,7 @@ int main(int argc, char *argv[])
     uint64_t counter(0);
     vector<thread> v;
     for (uint64_t t = 0; t < 1000; t++) {
-        v.push_back(thread(thread_entry, t, &counter));
+        v.emplace_back(thread(thread_entry, t, &counter));
     }
     for (auto &t : v) { t.join(); }
     printf("%lu\n", counter);
@@ -205,7 +204,7 @@ int main(int argc, char *argv[])
     atomic_uint64_t counter(0);
     vector<thread> v;
     for (uint64_t t = 0; t < 1000; t++) {
-        v.push_back(thread(thread_entry, t, &counter));
+        v.emplace_back(thread(thread_entry, t, &counter));
     }
     for (auto &t : v) { t.join(); }
     printf("%lu\n", counter.load(memory_order_relaxed));
@@ -225,8 +224,8 @@ int main(int argc, char *argv[])
 
 <div>
 
-- 若线程 A 中的原子写是 `memory_order_release` ，线程 B 同一变量的原子读是 `memory_order_acquire`
-- A 对该变量原子写之前的所有内存写入（非原子及 relax），在线程 B 都是可见的，B 可以读取到 A 写入的值
+- 若线程 A 中的原子写是 release ，线程 B 同一变量的原子读是 acquire
+- 则 A 对该变量原子写之前的所有内存写入（非原子及 relax），在线程 B 都是可见的，B 可以读取到 A 写入的值
 - 形象一点，把 aquire-release 看作加锁的临界区，临界区内的代码不会跑出 lock-unlock 的边界
 
 左边的例子使用了 Relaxed，因此导致了错误，正确的应该使用 Aquire-Release
@@ -254,7 +253,7 @@ int main(int argc, char *argv[]) {
     uint64_t counter = 0;
     vector<thread> v;
     for (uint64_t t = 0; t < 100; t++) {
-        v.push_back(thread(thread_entry, t, &counter));
+        v.emplace_back(thread(thread_entry, t, &counter));
     }
     for (auto &t : v) { t.join(); }
     printf("counter: %lu\n", counter);
@@ -283,11 +282,9 @@ h2 {
 
 弱化版的 aquire-release，顺序关系只和内存序作用的变量有关
 
-- 若线程 A 中的原子写是 `memory_order_release` ，线程 B 同一变量的原子读写是 `memory_order_consume`
+- 若线程 A 中的原子写是 release ，线程 B 同一变量的原子读写是 consume
 - 则 A 对该变量原子写之前的所有内存写入（**非原子及 relax**），对于依赖线程 B 同一变量的原子读才是可见的
 - 即 B 中依赖原子读的函数或操作符才可以看到 A 写入内存的内容
-
-解决左边的问题就是将 order 参数全部删除，因为默认的无参数重载使用的是 `memory_order_seq_cst`
 
 </div>
 
@@ -389,7 +386,6 @@ void RefBase::incStrong(const void* id) const
     weakref_impl* const refs = mRefs;
     refs->incWeak(id);
 
-    // 由于有条件判断的依赖，这里的两个原子加减不会乱序
     const int32_t c =
         refs->mStrong.fetch_add(1, memory_order_relaxed);
     if (c == INITIAL_STRONG_VALUE)
