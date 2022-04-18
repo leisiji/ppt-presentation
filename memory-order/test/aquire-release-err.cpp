@@ -9,7 +9,7 @@ using namespace std;
 int main() {
     vector<thread> v;
     for (int j = 0; j < 10000; j++) {
-        v.push_back(thread([] () {
+        v.emplace_back(thread([] () {
             atomic_bool x(false), y(false);
             atomic_int64_t z(0);
             for (int j = 0; j < 1000; j++) {

@@ -19,7 +19,7 @@ void test(memory_order order1, memory_order order2)
     int b = 0;
 
     // producer
-    v.push_back(thread([&] () {
+    v.emplace_back(thread([&] () {
         for (int i = 0; i < LOOP; i++) {
             for (int i = 0; i < LOOP; i++) {
                 usleep(1000);
@@ -32,7 +32,7 @@ void test(memory_order order1, memory_order order2)
     }));
 
     // consumer
-    v.push_back(thread([&] () {
+    v.emplace_back(thread([&] () {
         while (!finished.load(memory_order_acquire)) {
             while ((a.load(order2) % 10) != 0) {
                 b++;

@@ -52,8 +52,8 @@ drawings:
 volatile 的作用只有一个：告诉编译器不要进行优化
 
 ```c
-// 不加 volatile，gcc 开启 -O2 会发现 thread2 永远无法退出
-// clang 开启 -O2 不会出现下面的情况
+// 不加 volatile，gcc -O2 会发现 thread2 永远无法退出
+// clang -O2 不会出现下面的情况
 static volatile int thread_var = 1;
 void *thread1(void *arg) {
     sleep(1);
@@ -220,7 +220,6 @@ int main(int argc, char *argv[])
 ---
 
 ## Aquire-Release
-
 
 <div class="grid grid-cols-2 gap-x-4">
 
