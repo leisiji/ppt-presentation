@@ -13,7 +13,7 @@ void *thread_entry(void *data)
         while (atomic_exchange_explicit(&locked, true, memory_order_acquire)) {}
         int cur = *sum;
         *sum = cur + 1;
-        atomic_store(&locked, false);
+        atomic_store_explicit(&locked, false, memory_order_release);
     }
 
     return NULL;
