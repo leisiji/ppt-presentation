@@ -445,22 +445,29 @@ Disassembly of section .text:
  8e8:	b9004fff 	str	wzr, [sp, #76]
  8ec:	14000024 	b	97c <thread_entry+0xa8>
  8f0:	d503201f 	nop
+
+ // 将 locked 的地址 (11051) 保存到栈上 [sp, #56]
  8f4:	b0000080 	adrp	x0, 11000 <__libc_start_main@GLIBC_2.34>
  8f8:	91014400 	add	x0, x0, #0x51
  8fc:	f9001fe0 	str	x0, [sp, #56]
+
+ // 将 1 存到栈 [sp, #39]，并作为参数传给 __aarch64_swp1_acq
  900:	52800020 	mov	w0, #0x1                   	// #1
  904:	39009fe0 	strb	w0, [sp, #39]
  908:	39409fe0 	ldrb	w0, [sp, #39]
  90c:	2a0003e2 	mov	w2, w0
+
  910:	f9401fe0 	ldr	x0, [sp, #56]
  914:	aa0003e1 	mov	x1, x0
  918:	2a0203e0 	mov	w0, w2
  91c:	9400004d 	bl	a50 <__aarch64_swp1_acq>
+
  920:	12001c00 	and	w0, w0, #0xff
  924:	39009be0 	strb	w0, [sp, #38]
  928:	39409be0 	ldrb	w0, [sp, #38]
  92c:	7100001f 	cmp	w0, #0x0
  930:	54fffe21 	b.ne	8f4 <thread_entry+0x20>  // b.any
+
  934:	f94023e0 	ldr	x0, [sp, #64]
  938:	b9400000 	ldr	w0, [x0]
  93c:	b90037e0 	str	w0, [sp, #52]
@@ -483,6 +490,7 @@ Disassembly of section .text:
  97c:	b9404fe0 	ldr	w0, [sp, #76]
  980:	71018c1f 	cmp	w0, #0x63
  984:	54fffb6d 	b.le	8f0 <thread_entry+0x1c>
+
  988:	d2800000 	mov	x0, #0x0                   	// #0
  98c:	a8c57bfd 	ldp	x29, x30, [sp], #80
  990:	d65f03c0 	ret
