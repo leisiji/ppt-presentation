@@ -35,32 +35,36 @@ drawings:
 
 ### Load-Link (LL), Store-Conditional (SC)
 
-ARMv8 没有实现 release-consume 语义
-
-总共有 2 个指令：
+ARMv7 使用 LDREX 和 STREX 实现原子操作，ARMv8 改名为 LDXR 和 STXR
 
 - LDXR，将内存加载寄存器，并标记对内存区域的独占访问，可以重复设置独占标记
-- STXR，将寄存器写到内存，清空独占标记，若发现独占标记清空，则不会更新内存，将寄存器设为 1
+- STXR (Store Exclusive Register)，将寄存器写到内存，清空独占标记，若发现独占标记清空，则不会更新内存，将寄存器设为 1
 
-重点在 STXR，若更新内存失败，则不断重试 LDXR/STXR，这样就实现了原子写；读操作必定是原子的
+重点在 STXR，若更新内存失败，则不断重试 LDXR/STXR，这样就实现了原子写
+
+指令格式：
+
+- `LDXR <Xt>, [<Xn|SP>{,#0}]`，和普通 load 没有区别，只是会设置独占标记
+- `STXR <Ws>, <Xt>, [<Xn|SP>{,#0}]`，若成功则执行 exclusive access，且 Ws 写 0，否则写 1
+
+LL/SC 本质就是一个 CAS，MIPS 和 RISCV 也使用类似的机制去实现原子操作
+
+---
 
 ### LSE (Large System Extensions)
 
-因为 LL/SC 本质是多个核去抢占某个内存地址的独占访问，在多核上会存在严重的性能问题，因此引入了 LSE
+ARMv8.1 引入了 LSE，用以改善原子操作性能，改善多核下的性能
 
 <div class="grid grid-cols-2 gap-x-4">
 
 <div>
 
-LSE 的 Atomic Load/Release
-
+Atomic Load/Release
 
 | 指令               | 语义                  |
 | ---                | ---                   |
 | LDAR, LDARH, LDARB | Load-Acquire Register |
 | STLR, STLRH, STLRB | Store-Release         |
-
-SWPAL 同时具有 aquire-release 语义，因此还有 SWPA 和 SWPL 提供单独的语义（LDADDA, LDADDL, LDADDAL 同理）
 
 </div>
 
@@ -81,6 +85,11 @@ CAS (SWP 系列指令) ：
 </div>
 
 </div>
+
+LSE 总结：总共有 store，load, load-add, swap 这几类原子指令
+
+- 指令后带有 A 的是 Aquire，L 则是 Release，AL 则是 Aquire-Release，没有则是 Relax
+- 只有 store-release (L) 和 load-aquire (A)，但是 ldadd 和 swp 有 AL
 
 ---
 
@@ -219,7 +228,6 @@ a78: ret
 
 ### Store-Release
 
-
 ```c
 atomic_store_explicit(&locked, false,
         memory_order_release);
@@ -242,7 +250,7 @@ atomic_store_explicit(&locked, false,
 
 ### seq-cst
 
-ARMv8 并没有实现 release-consume 和 seq-cst，因此对应的 load/store 会被翻译为 load-squire 以及 store-release
+ARMv8 并没有实现 release-consume 和 seq-cst，因此对应的 load/store 会被翻译为 load-aquire 以及 store-release
 
 ldar 对应了 load consume (seq-cst)，stlr 对应了 store release (seq-cst)
 
@@ -258,7 +266,7 @@ ARMv8 的常用 mb 包括 ISB, DMB, DSB，还有其它的 MB 如 Speculation Bar
 
 - Instruction Synchronization Barrier (**ISB**)
   - 清空 PE 的流水线，ISB 后的所有指令再从 cache 或 memroy 中取出
-  - 保证 ISB 前的上下文切换代码，能够在 ISB 后的指令执行前起效果
+  - 保证 ISB 前的上下文切换代码
 - Data Memory Barrier (**DMB**)：保证了其前后内存访问的相对顺序
 - Data Synchronization Barrier (**DSB**)
   - 保证 DSB 前面的内存访问在 DSB 指令前完成，是比 DMB 更强的 barrier
