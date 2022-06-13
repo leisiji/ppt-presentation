@@ -4,10 +4,12 @@
 
 void *thread_entry(void *data)
 {
-    atomic_int *sum = data;
+    atomic_int *sum = (atomic_int*)data;
 
     for (int i = 0; i < 100; i++) {
         atomic_fetch_add_explicit(sum, 1, memory_order_relaxed);
+        int a = atomic_load_explicit(sum, memory_order_relaxed);
+        atomic_store_explicit(sum, a + 1, memory_order_relaxed);
     }
 
     return NULL;

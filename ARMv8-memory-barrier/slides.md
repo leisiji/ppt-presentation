@@ -93,16 +93,13 @@ LSE 总结：总共有 store，load, load-add, swap 这几类原子指令
 
 ---
 
-<div class="grid grid-cols-2 gap-x-4">
-
-<div>
-
 ### Add Relax
+
+原子 add 形式：`LDADD <Xs>, <Xt>, [<Xn|SP>]`，效果为 `*(Xn|SP) += Xs`，Xt 是修改前的值
 
 ```c
 atomic_int sum = 0;
-atomic_fetch_add_explicit(&sum, 1,
-                          memory_order_relaxed);
+atomic_fetch_add_explicit(&sum, 1, memory_order_relaxed);
 ```
 
 ```asm
@@ -123,52 +120,18 @@ a18:  cbnz  w15, a0c <__aarch64_ldadd4_relax+0x1c>
 a1c:  ret
 ```
 
-</div>
-
-<div>
-
-### Store-Relax
-
-```c
-atomic_bool locked;
-atomic_store_explicit(&locked, false,
-                      memory_order_relaxed);
-```
-
-```asm
-0000000000000a50 <__aarch64_swp1_relax>:
-a50: bti c
-a54: adrp    x16, 11000 <__libc_start_main@GLIBC_2.34>
-a58: ldrb    w16, [x16, #82]
-a5c: cbz w16, a68 <__aarch64_swp1_relax+0x18>
-
-a60: swpb    w0, w0, [x1]
-a64: ret
-
-a68: mov w16, w0
-a6c: ldxrb   w0, [x1]
-a70: stxrb   w17, w16, [x1]
-a74: cbnz    w17, a6c <__aarch64_swp1_relax+0x1c>
-a78: ret
-```
-
-
-</div>
-
-</div>
+> store relax 和 load-relax 都是普通的指令，即 str 和 ldr 已经有 atomic relax 语义
 
 ----
 
-<div class="grid grid-cols-2 gap-x-4">
-
-<div>
-
 ### Exchg-Relax
+
+CAS 指令形式为 `SWP <Xs>, <Xt>, [<Xn|SP>]`，将 Xn 内存单元的值读到 Xt，同时将 Xs 写入到 Xn 内存单元
 
 ```c
 atomic_bool locked;
-while (atomic_exchange_explicit(&locked,
-       true, memory_order_relaxed)) { }
+// 返回值是 locked 交换前的值
+while (atomic_exchange_explicit(&locked, true, memory_order_relaxed)) { }
 ```
 
 ```asm
@@ -188,15 +151,14 @@ a74: cbnz    w17, a6c <__aarch64_swp1_relax+0x1c>
 a78: ret
 ```
 
-</div>
+> 问题：str 和 ldr 都有 atomic relax 的语义，但为什么简单的多线程自增变量还是会出现 bug？
 
-<div>
+---
 
 ### Exchg-Aquire
 
 ```c
-atomic_exchange_explicit(&locked, true,
-        memory_order_acquire);
+atomic_exchange_explicit(&locked, true, memory_order_acquire);
 ```
 
 ```asm
@@ -216,21 +178,12 @@ a74: cbnz    w17, a6c <__aarch64_swp1_acq+0x1c>
 a78: ret
 ```
 
-</div>
-
-</div>
-
 ---
-
-<div class="grid grid-cols-2 gap-x-4">
-
-<div>
 
 ### Store-Release
 
 ```c
-atomic_store_explicit(&locked, false,
-        memory_order_release);
+atomic_store_explicit(&locked, false, memory_order_release);
 ```
 
 ```asm
@@ -244,19 +197,12 @@ atomic_store_explicit(&locked, false,
 96c:   stlrb   w1, [x0] /* Store-Release */
 ```
 
-</div>
-
-<div>
-
 ### seq-cst
 
-ARMv8 并没有实现 release-consume 和 seq-cst，因此对应的 load/store 会被翻译为 load-aquire 以及 store-release
+ARMv8 并没有实现 release-consume 和 seq-cst，会退化为如下的转换：
 
-ldar 对应了 load consume (seq-cst)，stlr 对应了 store release (seq-cst)
-
-</div>
-
-</div>
+- store-consume 和 store-seq-cst 会转化为 store-release (`stlr`)
+- load-seq-cst 会转化为 load-aquire (`ldar`)
 
 ---
 
@@ -344,3 +290,40 @@ C11 fence 对应的 mb 指令：
 - `atomic_thread_fence(memory_order_seq_cst)` 对应 `dmb ish`
 - `atomic_thread_fence(memory_order_release)` 对应 `dmb ish`
 - `atomic_thread_fence(memory_order_aquire)` 对应 `dmb ishld`
+
+---
+
+
+<div class="text-sm">
+例子 1
+
+```c
+int __pthread_once(pthread_once_t *once, void (*init_routine)(void)) {
+    int val = atomic_load_acquire(once);
+    if ((val & __PTHREAD_ONCE_DONE) != 0)
+        return 0;
+    return __pthread_once_slow(once, init_routine);
+}
+int __pthread_once_slow(pthread_once_t *once, void (*init_routine)(void)) {
+    while (1) {
+        int newval, val = atomic_load_acquire(once);
+        do {
+            if ((val & __PTHREAD_ONCE_DONE) != 0)
+                return 0;
+            newval = __fork_generation | __PTHREAD_ONCE_INPROGRESS;
+        } while (!atomic_compare_exchange_weak_acquire(once, &val, newval))
+        if (val & __PTHREAD_ONCE_INPROGRESS != 0) {
+            if (val == newval) {
+                futex_wait_simple(once, newval, FUTEX_PRIVATE);
+                continue;
+            }
+        }
+        // ...
+        atomic_store_release(once, __PTHREAD_ONCE_DONE);
+        futex_wake(once, INT_MAX, FUTEX_PRIVATE);
+        break;
+    }
+}
+```
+
+</div>
