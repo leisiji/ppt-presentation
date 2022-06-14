@@ -1,24 +1,12 @@
 ---
-# try also 'default' to start simple
 theme: seriph
-# random image from a curated Unsplash collection by Anthony
-# like them? see https://unsplash.com/collections/94734566/slidev
 background: https://source.unsplash.com/collection/94734566/1920x1080
-# apply any windi css classes to the current slide
 class: 'text-center'
-# https://sli.dev/custom/highlighters.html
 highlighter: shiki
-# show line numbers in code blocks
 lineNumbers: false
-# some information about the slides, markdown enabled
-info: |
-  ## Slidev Starter Template
-  Presentation slides for developers.
-
-  Learn more at [Sli.dev](https://sli.dev)
-# persist drawings in exports and build
 drawings:
   persist: false
+
 ---
 
 # ARMv8 Atomic and Memory Barrier
@@ -48,6 +36,11 @@ ARMv7 使用 LDREX 和 STREX 实现原子操作，ARMv8 改名为 LDXR 和 STXR
 - `STXR <Ws>, <Xt>, [<Xn|SP>{,#0}]`，若成功则执行 exclusive access，且 Ws 写 0，否则写 1
 
 LL/SC 本质就是一个 CAS，MIPS 和 RISCV 也使用类似的机制去实现原子操作
+
+指令形式：
+
+- `LDXR <Xt>, [<Xn|SP>{,#0}]`，和普通的 LDR 指令是一样的形式
+- `STXR <Ws>, <Xt>, [<Xn|SP>{,#0}]`，比普通的 STR 指令多了一个 Ws，用于存放 store exclusive 是否写入成功
 
 ---
 
@@ -95,7 +88,7 @@ LSE 总结：总共有 store，load, load-add, swap 这几类原子指令
 
 ### Add Relax
 
-原子 add 形式：`LDADD <Xs>, <Xt>, [<Xn|SP>]`，效果为 `*(Xn|SP) += Xs`，Xt 是修改前的值
+原子 add 形式：`LDADD <Xs>, <Xt>, [<Xn|SP>]`，效果为 `*(Xn|SP) += Xs`，Xt 返回修改前的值
 
 ```c
 atomic_int sum = 0;
@@ -218,7 +211,7 @@ ARMv8 的常用 mb 包括 ISB, DMB, DSB，还有其它的 MB 如 Speculation Bar
   - 保证 DSB 前面的内存访问在 DSB 指令前完成，是比 DMB 更强的 barrier
   - DMB 只能保证内存访问指令的顺序，DSB 可以保证内存访问指令相对于任意指令的顺序
 
-DMB/DSB 需要 2 个参数：操作类型 (ST 或 LD) 和 shareability domain (ISH, OSH, NSH)
+DMB/DSB 需要 2 个参数：操作类型 (SY, ST, LD) 和 shareability domain (ISH, OSH, NSH)
 
 | mb 前后 | Full system | Outer Shareable | Inner Shareable | Non-shareable |
 | ---     | ---         | ---             | ---             | ---           |
@@ -240,7 +233,6 @@ DMB/DSB 需要 2 个参数：操作类型 (ST 或 LD) 和 shareability domain (I
 
 <img src="/29070709268700.png" class="h-100" />
 
-> 最简单的理解：CPU 的内部认为是 ISH，外部器件（DMA）认为是 OSH；这一点通过 linux 宏 `mb*(), smp_*mb(), dma_*mb()` 可以看出来
 
 </div>
 
@@ -253,16 +245,18 @@ DMB/DSB 需要 2 个参数：操作类型 (ST 或 LD) 和 shareability domain (I
 - Outer shareable (OSH)：也是被多个 agents 共享的，并影响其内部的 ISH domain，比如 Mali GPU
 - Full system (SY)：被所有 agents 所共享的，比如串口等
 
+> 最简单的理解：CPU 的内部认为是 ISH，外部器件（DMA）认为是 OSH；这一点通过 linux 宏 `mb*(), smp_*mb(), dma_*mb()` 可以看出来
+
+</div>
+
+</div>
+
 mb 和带 mb 的原子指令的区别：
 
 - Load-Acquire 是单向的，保证之后的指令不能在 Load-Acquire 之前执行
 - Store-Release 是单向的，保证之前的指令不能在 Store-Release 之后执行
 - Memory-Barrier 是双向的，保证前和后指令的相对顺序，但也无法保证前面指令组内部的顺序
 - 当然原子指令也有双向版本的，具有 aquire-release 双语义，如 swpal 和 ldaddal
-
-</div>
-
-</div>
 
 ---
 
@@ -293,11 +287,8 @@ C11 fence 对应的 mb 指令：
 
 ---
 
-
-<div class="text-sm">
-例子 1
-
 ```c
+// 例子 1
 int __pthread_once(pthread_once_t *once, void (*init_routine)(void)) {
     int val = atomic_load_acquire(once);
     if ((val & __PTHREAD_ONCE_DONE) != 0)
@@ -325,5 +316,3 @@ int __pthread_once_slow(pthread_once_t *once, void (*init_routine)(void)) {
     }
 }
 ```
-
-</div>
