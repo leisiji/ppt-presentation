@@ -30,6 +30,7 @@ drawings:
 - Node-Zone-Page
 - 通过 procfs 了解 node 以及 zone
 - Linux 如何添加物理内存
+- memmap 和 buddy 简介
 
 ---
 
@@ -55,10 +56,6 @@ fffffe0000000000  ffffffffffffffff     2TB    [guard region]
 ```
 
 虚拟地址空间的每个区间基本是编译时通过宏就确定下来的，注意，虚拟内存的布局和物理内存没有任何关系；Linux 的虚拟内存和物理内存是分开管理的，物理内存最重要的接口就是 `__get_free_pages()`，虚拟内存就是通过该接口获取实际的物理内存；虚拟内存管理方式有多种，其中一种叫做 slab
-
-```c
-unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order); // 返回的是物理地址，映射到哪个虚拟地址由调用者决定
-```
 
 ---
 
@@ -97,12 +94,25 @@ void kvfree(const void *addr);
 
 NUMA (Non Uniform Memory Access) 系统上有多个 CPU，CPU 与不同位置的内存的延迟不同，每个 Node 可以看作是一个 CPU
 
+根据 Node 去划分不同的内存，尽量保证执行申请内存的 CPU 可以得到本 Node 上的内存，减小内存延迟
+
+```c
+int numa_node_id(void); // 获取当前的 Node
+```
+
 > 为什么要把多个 CPU 做成一个 CPU，而不是做一个超多核的 CPU？
 
-Node, Zone:
+Zone 是根据内存的用途去划分的，比如某些平台的 DMA 只能使用 16bit 的地址；但这不是说 `ZONE_DMA` 不能分配给普通的内存，由于有内存迁移机制，普通的内存也可以分配到 `ZONE_DMA`
 
-- Node 可以是从内存亲和性出发的定义，看到的表现是地址上的分布
-- Zone 是根据地址范围来定义，不论系统上的内存大小是多少，每个 zone 的空间是一定的，如 `ZONE_DMA` 一定是 16M 以下的空间
+```c
+enum zone_type {
+    ZONE_DMA,
+    ZONE_DMA32,
+    ZONE_NORMAL,
+    ZONE_MOVABLE,
+    MAX_NR_ZONES
+};
+```
 
 ---
 
@@ -141,17 +151,45 @@ AArch64 虚拟地址的比特位含义：
 
 ```c
 struct pglist_data *node_data[MAX_NUMNODES];
-typedef struct pglist_data { struct zone node_zones[MAX_NR_ZONES]; /*... */ };
-struct zone { struct free_area free_area[MAX_ORDER]; /*... */ };
+typedef struct pglist_data {
+    struct zone node_zones[MAX_NR_ZONES];
+    /*... */
+};
+struct zone {
+    struct free_area free_area[MAX_ORDER];
+    /*... */
+};
 struct free_area {
     struct list_head free_list[MIGRATE_TYPES];
     unsigned long nr_free;
 };
-struct page {
-    union {
-        struct { struct list_head lru; /* ... */ };
-    }; //..
-};
+```
+
+---
+
+```txt
+node_data[0]                                                node_data[1]
++-----------------------------+                     +-----------------------------+
+|node_id                <---+ |                     |node_id                <---+ |
+|   (int)                   | |                     |   (int)                   | |
++-----------------------------+                     +-----------------------------+
+|node_zones[MAX_NR_ZONES]   | |    [ZONE_DMA]       |node_zones[MAX_NR_ZONES]   | |   [ZONE_DMA]
+|   (struct zone)           | | +---------------+   |   (struct zone)           | | +---------------+
+|   +-------------------------+ |0              |   |   +-------------------------+ |empty          |
+|   |                       | | |16M            |   |   |                       | | |               |
+|   |zone_pgdat         ----+ | +---------------+   |   |zone_pgdat         ----+ | +---------------+
+|   |                         |                     |   |                         |
+|   |                         | [ZONE_DMA32]        |   |                         | [ZONE_DMA32]
+|   |                         | +---------------+   |   |                         | +---------------+
+|   |                         | |16M            |   |   |                         | |3G             |
+|   |                         | |3G             |   |   |                         | |4G             |
+|   |                         | +---------------+   |   |                         | +---------------+
+|   |                         |                     |   |                         |
+|   |                         | [ZONE_NORMAL]       |   |                         | [ZONE_NORMAL]
+|   |                         | +---------------+   |   |                         | +---------------+
+|   |                         | |empty          |   |   |                         | |4G             |
+|   |                         | |               |   |   |                         | |6G             |
++---+-------------------------+ +---------------+   +---+-------------------------+ +---------------+
 ```
 
 ---
@@ -178,7 +216,7 @@ Node 0, zone      DMA
 ```
 
 - 高于 high 时说明剩余内存充足；低于 low 但高于 min 时说明内存短缺但是仍可分配，此时会唤醒 kswapd 去异步回收；若低于 min 则说明剩余内存极度短缺将停止分配并全力回收
-- spanned：zone 能够容纳页数，包括空洞；present：zone 真实存在的页数；managed：buddy 子系统管理的页数（减去了 reserved）
+- spanned：zone 能够容纳页数，包括空洞；present：zone 真实存在的页数；managed：buddy 子系统管理的页数（减去了 memblock reserved）
 
 ---
 
@@ -244,7 +282,7 @@ void detect_memory_e820(void)
 
 ---
 
-#### memblock 是 kernel 启动阶段的简单内存分配器：
+#### memblock 是 kernel 启动阶段的简单内存分配器
 
 ```c
 int memblock_add(phys_addr_t base, phys_addr_t size);
@@ -276,7 +314,7 @@ struct memblock memblock __initdata_memblock = {
 
 ---
 
-#### Node 初始化
+#### Node, Zone 初始化
 
 <div class="grid grid-cols-2 gap-x-4">
 
@@ -313,24 +351,46 @@ int arch_acpi_numa_init(void)
 
 </div>
 
-#### zone 初始化
+<div>
+
+Zone:
 
 ```c
 void zone_sizes_init(unsigned long min, unsigned long max)
 {
-    /* 每个 zone 的最大 page frame number */
-    unsigned long max_zone_pfns[MAX_NR_ZONES] = {0};
-
-    // zone_dma_bits 从 32, dts dma-ranges, acpi table 这 3 者选出最小的
+    unsigned long max_zone_pfns[MAX_NR_ZONES] = {0}; /* 每个 zone 的最大 page frame number */
+    // zone_dma_bits 从 32, dts dma-ranges, acpi table 这 3 者选出最小的，后两个通常是 0xffffffffffffffff
     unsigned int zone_dma_bits = min3(32U, dt_zone_dma_bits, acpi_zone_dma_bits);
     max_zone_pfns[ZONE_DMA] = PFN_DOWN(max_zone_phys(zone_dma_bits));
-
-    /* max_zone_phys(n) = min(memblock_end_of_DRAM(), 1<<n) */
-    max_zone_pfns[ZONE_DMA32] = PFN_DOWN(max_zone_phys(32));
-
+    max_zone_pfns[ZONE_DMA32] = PFN_DOWN(min(memblock_end_of_DRAM(), 1<<32));
     max_zone_pfns[ZONE_NORMAL] = max;
-    /* 这里贴出 gdb 的 p/x max_zone_pfns：{0x80000, 0x80000, 0x80000, 0x0} */
-
     free_area_init(max_zone_pfns);
 }
+```
+
+</div>
+
+---
+
+#### memmap
+
+memmap 是存放 `struct page` 的一段内存区域
+
+- 其本质是一个 struct page 的大数组（*这个叫做 sparse vmemmap，Linux 还有 flatmemmap*），这个大数组的存在是为了实现内存热插拔
+- 这个数组只会建立映射（填充了对应的页表），但不会真正地占用物理内存
+- 通过 vmemmap 宏去访问这个数组，该数组是虚拟地址连续，但是物理地址不连续；pfn 是 page frame number 的缩写，是该数组的索引
+
+```c
+#define vmemmap  ((struct page *)VMEMMAP_START - (memstart_addr >> PAGE_SHIFT))
+```
+
+struct page 作用非常多，因为页有不同的用途，如 slab, page tables, page cache, userspace
+
+#### buddy
+
+buddy 根据 order 去管理 page（2^order），即最小申请的物理内存也是一个页的大小（4K）
+
+```c
+/* buddy 最重要的接口，slab 和 vmalloc 都是使用该接口申请物理内存 */
+unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order); // 返回的是物理地址，映射到哪个虚拟地址由调用者决定
 ```
