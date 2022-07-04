@@ -2,13 +2,15 @@
 #include <unistd.h>
 
 static int thread_var = 1;
+int a = 1;
 void *thread1(void *arg) {
     sleep(1);
     thread_var = 1000;
     return NULL;
 }
 void *thread2(void *arg) {
-    while (thread_var != 1000) {}
+    while (thread_var != 1000) { a++; }
+    printf("hello world\n");
     return NULL;
 }
 int main(int argc, char *argv[]) {

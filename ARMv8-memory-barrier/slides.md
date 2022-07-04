@@ -247,16 +247,14 @@ DMB/DSB 需要 2 个参数：操作类型 (SY, ST, LD) 和 shareability domain (
 
 > 最简单的理解：CPU 的内部认为是 ISH，外部器件（DMA）认为是 OSH；这一点通过 linux 宏 `mb*(), smp_*mb(), dma_*mb()` 可以看出来
 
-</div>
-
-</div>
-
 mb 和带 mb 的原子指令的区别：
 
-- Load-Acquire 是单向的，保证之后的指令不能在 Load-Acquire 之前执行
-- Store-Release 是单向的，保证之前的指令不能在 Store-Release 之后执行
-- Memory-Barrier 是双向的，保证前和后指令的相对顺序，但也无法保证前面指令组内部的顺序
-- 当然原子指令也有双向版本的，具有 aquire-release 双语义，如 swpal 和 ldaddal
+- memory barrier 出现的更早，可以阻止单线程的乱序执行
+- 原子指令一般针对多线程间的指令执行顺序，当然它也可以针对单线程，但是这时候可以用 mb 代替
+
+</div>
+
+</div>
 
 ---
 
