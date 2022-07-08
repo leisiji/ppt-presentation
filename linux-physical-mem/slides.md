@@ -394,3 +394,28 @@ buddy 根据 order 去管理 page（2^order），即最小申请的物理内存�
 /* buddy 最重要的接口，slab 和 vmalloc 都是使用该接口申请物理内存 */
 unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order); // 返回的是物理地址，映射到哪个虚拟地址由调用者决定
 ```
+
+---
+
+### free 命令
+
+free 命令读取了 `/proc/meminfo` 内容
+
+- **total**: MemTotal + SwapTotal
+- **used**: total - free - buffers - cache
+- **free**: MemFree, SwapFree
+- **buffers**: Buffers
+- **cache**: Cached, SReclaimable
+- **available**: MemAvailable
+
+详见 `meminfo_proc_show()`
+
+- MemTotal: 可用的物理内存减去 reserved 和 kernel-img
+- MemFree: LowFree+HighFree
+- MemAvailable: 在没有 swap 下启动新应用时可用内存的估计值
+- Buffers: Buffer cache 是指磁盘设备上的 raw data（指不以文件的方式组织），以 block 为单位
+- Cached: 文件的 page cache 减去 SwapCached 和 Buffers
+- SwapCached: 被 swap out 到 swapfile 的内存
+- Dirty: 等待被回写到磁盘的内存 (通过 `sync` 能够减小)
+- Writeback: 正在被回写到磁盘的内存（通常为 0）
+- Shmem: 被共享内存 (shmem) 和 tmpfs 占用的内存（属于 anonymous pages）
