@@ -220,7 +220,7 @@ Node 0, zone      DMA
 
 ---
 
-#### Linux 如何添加物理内存 (arm64 dts)
+#### arm64 如何添加物理内存
 
 通过 `memblock_add()` 添加物理内存，有了物理内存才可以初始化 zone：
 
@@ -251,7 +251,7 @@ int early_init_dt_scan_memory(unsigned long node, const char *uname, int depth, 
 
 ---
 
-#### Linux 如何添加物理内存 (x86 e820)
+#### x86 如何添加物理内存
 
 x86 初始化物理内存需要一个额外的硬件 e820：
 
@@ -278,6 +278,38 @@ void detect_memory_e820(void)
         *desc++ = buf;
     } while (ireg.ebx && count < ARRAY_SIZE(boot_params.e820_table));
 }
+```
+
+---
+
+#### mstar 如何添加物理内存
+
+```c
+// LX_MEM=0x22100000 LX_MEM2=0x56C00000,0x46E00000 LX_MEM3=0x180000000,0x80000000
+void __init prom_meminit(void)
+{
+    get_boot_mem_info(LINUX_MEM3, &linux_memory3_address, &linux_memory3_length);
+    //...
+    if (linux_memory_length != 0)
+        early_init_dt_add_memory_arch(linux_memory3_address, linux_memory3_length);
+}
+void get_boot_mem_info(BOOT_MEM_INFO type, u64 *addr, u64 *len)
+{
+    switch (type) {
+    case LINUX_MEM3:
+        if (LXmem3Addr != 0 && LXmem3Size != 0) {
+            *addr = LXmem3Addr;
+            *len = LXmem3Size;
+        }
+        break;
+        //...
+    }
+}
+int LX_MEM3_setup(char *str)
+{
+    sscanf(str, "%lx,%lx", &LXmem3Addr, &LXmem3Size);
+}
+early_param("LX_MEM3", LX_MEM3_setup);
 ```
 
 ---
@@ -399,6 +431,10 @@ unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order); // 返回的
 
 ### free 命令
 
+<div class="grid grid-cols-3 gap-x-4">
+
+<div class="col-span-1">
+
 free 命令读取了 `/proc/meminfo` 内容
 
 - **total**: MemTotal + SwapTotal
@@ -407,6 +443,10 @@ free 命令读取了 `/proc/meminfo` 内容
 - **buffers**: Buffers
 - **cache**: Cached, SReclaimable
 - **available**: MemAvailable
+
+</div>
+
+<div class="col-span-2">
 
 详见 `meminfo_proc_show()`
 
@@ -419,3 +459,7 @@ free 命令读取了 `/proc/meminfo` 内容
 - Dirty: 等待被回写到磁盘的内存 (通过 `sync` 能够减小)
 - Writeback: 正在被回写到磁盘的内存（通常为 0）
 - Shmem: 被共享内存 (shmem) 和 tmpfs 占用的内存（属于 anonymous pages）
+
+</div>
+
+</div>
