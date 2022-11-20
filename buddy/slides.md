@@ -129,7 +129,6 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid, nod
     gfp_t alloc_gfp = gfp;
     struct alloc_context ac = {};
     unsigned int alloc_flags = ALLOC_WMARK_LOW;
-
     prepare_alloc_pages(gfp, order, preferred_nid, nodemask, &ac, &alloc_gfp, &alloc_flags);
 
     // 步骤 2：快速路径，不满足 zone watermark 的可能会转到 slowpath
@@ -146,8 +145,124 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid, nod
 
 ---
 
-buddy 快速路径：
+## buddy 分配快速路径
+
+遍历所有 zone：检查该 zone 是否满足水位需求（`WMARK_MIN`），若不满足触发 `node_reclaim()`，但不触发其他内存回收
 
 ```c
-
+struct page *get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
+                                    const struct alloc_context *ac)
+{
+    struct zone *zone;
+    for_next_zone_zonelist_nodemask(zone, z, ac->highest_zoneidx, ac->nodemask) {
+        // 从 __alloc_pages 可知，判断水位使用的是 WMARK_LOW
+        unsigned long mark = wmark_pages(zone, alloc_flags & ALLOC_WMARK_MASK);
+        if (!zone_watermark_fast(zone, order, mark, ac->highest_zoneidx, alloc_flags, gfp_mask)) {
+            // 回收内存
+        }
+        struct page *page = rmqueue(ac->preferred_zoneref->zone, zone, order, gfp_mask, alloc_flags, ac->migratetype);
+        if (page) {
+            prep_new_page(page, order, gfp_mask, alloc_flags);
+            return page;
+        }
+    }
+}
 ```
+
+---
+
+rmqueue
+
+- order<=3 时尝试从 pcp 分配 `zone::per_cpu_pages` (15 个元素的数组)，从而减小锁的竞争
+- order>3 从 `zone::free_area::free_list` 链表中获取
+
+```c
+struct page *rmqueue(struct zone *preferred_zone, struct zone *zone, unsigned int order,
+                     gfp_t gfp_flags, unsigned int alloc_flags, int migratetype)
+{
+    // PAGE_ALLOC_COSTLY_ORDER=3
+    if (order <= PAGE_ALLOC_COSTLY_ORDER && migratetype != MIGRATE_MOVABLE) {
+        return rmqueue_pcplist(preferred_zone, zone, order, gfp_flags, migratetype, alloc_flags);
+    }
+
+    struct page *page;
+    do {
+        page = __rmqueue(zone, order, migratetype, alloc_flags);
+    } while (page && check_new_pages(page, order));
+    return page;
+}
+```
+
+---
+
+`rmqueue_pcplist()` (per-cpu-pageset), order <= 3:
+
+```c
+struct per_cpu_pages {
+    int count; /* 链表中的 page 数 */
+    int high;  /* 每个 cpu 所能缓存的最多空闲页数目 */
+    int batch; /* 每次 cpu 维护的空闲页不足时，向 buddy 一次申请的内存页数目；/proc/zoneinfo 有该值 */
+    short free_factor;
+    short expire;
+    struct list_head lists[NR_PCP_LISTS]; /* 保存物理页的链表，NR_PCP_LISTS=15 (clangd) */
+};
+struct page *rmqueue_pcplist(struct zone *preferred_zone, struct zone *zone, unsigned int order,
+                             gfp_t gfp_flags, int migratetype, unsigned int alloc_flags)
+{
+    struct per_cpu_pages *pcp = this_cpu_ptr(zone->per_cpu_pageset);
+    pcp->free_factor >>= 1;
+    struct list_head *list = &pcp->lists[order_to_pindex(migratetype, order)];
+    if (list_empty(list)) {
+        int alloced = rmqueue_bulk(zone, order, 1, list, migratetype, alloc_flags);
+        pcp->count += alloced << order;
+    }
+    /* 将节点从 pcplists 中摘掉 */
+    struct page *page = list_first_entry(list, struct page, lru);
+    list_del(&page->lru);
+    pcp->count -= 1 << order;
+    return page;
+}
+```
+
+---
+
+`__rmqueue()` (zone free area), order > 3:
+
+```c
+struct page *__rmqueue(struct zone *zone, unsigned int order, int migratetype, unsigned int alloc_flags)
+{
+retry:
+    struct page *page = __rmqueue_smallest(zone, order, migratetype);
+    if (unlikely(!page)) {
+        if (__rmqueue_fallback(zone, order, migratetype, alloc_flags)) goto retry;
+    }
+    return page;
+}
+struct page *__rmqueue_smallest(struct zone *zone, unsigned int order, int migratetype)
+{
+    for (int current_order = order; current_order < MAX_ORDER; ++current_order) {
+        struct free_area *area = &(zone->free_area[current_order]);
+        struct page *page = list_first_entry_or_null(&area->free_list[migratetype], struct page, lru);
+        if (!page) continue;
+        del_page_from_free_list(page, zone, current_order);  // 摘掉节点
+        expand(zone, page, order, current_order, migratetype); // 分割 current_order，并插入到 zone 的其他 order 的链表
+        page->index = migratetype;
+        return page;
+    }
+    return NULL;
+}
+```
+
+---
+
+## buddy 分配慢速路径
+
+- 动用保留页帧。即忽略 `WMARK_MIN` 水位线，对于高优先级分配请求才会动用保留页帧
+  - 分配标志带 `ALLOC_HARDER` 的请求会将水位线降低 1/4；分配标志带 `ALLOC_HIGH` 或 `ALLOC_OOM` 的请求会将水位线降低 1/2
+  - `ALLOC_HARDER` 可与 `ALLOC_HIGH` 结合，将水位线降低 3/4；`ALLOC_OOM` 也可与 `ALLOC_HIGH` 结合，将水位线降低到 0
+- 内存规整压缩（`__alloc_pages_direct_compact()`）
+  - 只有 migratetype 为 `MIGRATE_MOVABLE` 和 `MIGRATE_CMA` 的页帧才允许迁移
+- 回收 Slab Cache 和 Page Cache，回收方式是直接丢弃 clean Page Cache（`__alloc_pages_direct_reclaim()`, `try_to_free_pages()`）
+- 写回 Buffer：磁盘脏缓冲区页叫 Block Buffer (`__alloc_pages_direct_reclaim()`, `try_to_free_pages()`)
+  - Block Buffer 本质是基于 Page Cache，Buffer 包含的实际上都是文件映射页中的脏页，必须回写
+- Swap：匿名映射页不像文件映射页那样存在唯一对应的 back file，所以只能换出到 Swap 分区或 Swap 文件（`__alloc_pages_direct_reclaim()`, `try_to_free_pages()`）
