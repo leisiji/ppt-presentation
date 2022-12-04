@@ -22,33 +22,33 @@ drawings:
 
 buddy 的作用是管理空闲内存页，是指 `zone::free_area[MAX_ORDER]` 这个数据结构
 
-分配和释放都是围绕 order 的切割和合并展开的
+分配和释放都是围绕 order 的切割和合并展开的，buddy 的含义是具有相同的 order
 
 ---
 
 ## zone buddy
 
 - 通过 blocks 管理空闲页面，每个都是 2^order 个 page 组成，即一个 order 对应了一个 page 数组
-- 同样大小的 page 数组通过链表连接，`zone::free_area::free_list[i]` 是链表的头节点
-- 同样的大小的 page 数组还通过迁移类型进行分类
+- linux 后来加入了迁移类型，进一步对同样大小的 page 数组进行分类
+- 同样大小的 page 数组通过链表连接，`zone::free_area[order]::free_list[migratetype]` 是链表的头节点
 
 ```c
+// 定位 buddy page 所在链表需要 2 个参数：zone::free_area[order]::free_list[migratetype]
 struct zone {
-    struct free_area free_area[MAX_ORDER]; // MAX_ORDER=11
-    // ...
+    struct free_area free_area[MAX_ORDER];           // MAX_ORDER=11
+    struct per_cpu_pages __percpu *per_cpu_pageset;  // 作为 free_area 的 per-cpu cache
 };
 struct free_area {
     struct list_head free_list[MIGRATE_TYPES];  // struct page 链表的头节点
     unsigned long nr_free;                      // 所有链表的所有节点的数量之和
+    // ...
 };
 enum migratetype {
     MIGRATE_UNMOVABLE,
     MIGRATE_MOVABLE,
     MIGRATE_RECLAIMABLE,
     MIGRATE_PCPTYPES, /* the number of types on the pcp lists */
-    MIGRATE_HIGHATOMIC = MIGRATE_PCPTYPES,
-    MIGRATE_CMA,
-    MIGRATE_ISOLATE, /* can't allocate from here */
+    // ...
     MIGRATE_TYPES
 };
 ```
@@ -115,6 +115,16 @@ void __free_pages(struct page *page, unsigned int order);
 // 这两个API也用于释放单独的一个页帧和连续的多个页帧，但是参数是第一个页帧的 va
 void free_pages(unsigned long addr, unsigned int order);
 #define free_page(addr) free_pages((addr), 0)
+```
+
+buddy page 也是一种类型的 page，它们是归属 buddy 的空闲 page，通过 `PageBuddy` 宏去判断：
+
+```c
+struct page {
+    union { struct { /* ... */ unsigned long private; /* buddy page 只用到了该字段 */ };
+    }; // ...
+    atomic_t _refcount; // 记录分配后的引用计数，为 0 时可以将该 page 归还到 buddy
+};
 ```
 
 ---
@@ -193,6 +203,8 @@ struct page *rmqueue(struct zone *preferred_zone, struct zone *zone, unsigned in
 }
 ```
 
+快速路径快的原因在于使用 pcp (per-cpu-pageset)，即每个 CPU 在每个 zone 缓存一个空闲 page 链表
+
 ---
 
 `rmqueue_pcplist()` (per-cpu-pageset), order <= 3:
@@ -266,3 +278,61 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order, int migra
 - 写回 Buffer：磁盘脏缓冲区页叫 Block Buffer (`__alloc_pages_direct_reclaim()`, `try_to_free_pages()`)
   - Block Buffer 本质是基于 Page Cache，Buffer 包含的实际上都是文件映射页中的脏页，必须回写
 - Swap：匿名映射页不像文件映射页那样存在唯一对应的 back file，所以只能换出到 Swap 分区或 Swap 文件（`__alloc_pages_direct_reclaim()`, `try_to_free_pages()`）
+
+---
+
+## 归还 page 给 buddy
+
+单个页帧的释放也是先放回 pcplist 再是 `zone::free_area[order]::free_list[migratetype]` 链表
+
+- 如果 PCP 的总页帧数超过了 PCP 的上限，则通过 `free_pcppages_bulk()` 归还 batch 个页帧到空闲链表
+- `free_pcppages_bulk()` 的核心是循环调用 `__free_one_page()` 释放每一个页帧
+- 释放页帧时，如果存在 buddy，把两个页进行递归合并
+
+```c
+/* 释放 alloc_pages() 返回的页 */
+void __free_pages(struct page *page, unsigned int order)
+{
+    if (0 == atomic_dec_and_test(&page->_refcount))
+        free_the_page(page, order);
+    else if (!PageHead(page))
+        while (order-- > 0) free_the_page(page + (1 << order), order);
+}
+void free_the_page(struct page *page, unsigned int order)
+{
+    if (order < PAGE_ALLOC_COSTLY_ORDER || order == pageblock_order)
+        free_unref_page(page, order);
+    else
+        __free_pages_ok(page, order, FPI_NONE);
+}
+```
+
+---
+
+归还到 pcp 的流程：
+
+```c
+void free_unref_page(struct page *page, unsigned int order)
+{
+    unsigned long pfn = page_to_pfn(page);
+    if (!free_unref_page_prepare(page, pfn, order)) return;
+    int migratetype = page->index;
+    free_unref_page_commit(page, pfn, migratetype, order);
+}
+void free_unref_page_commit(struct page *page, unsigned long pfn, int migratetype,
+                            unsigned int order)
+{
+    struct zone *zone = page_zone(page);
+    struct per_cpu_pages *pcp = this_cpu_ptr(zone->per_cpu_pageset);
+
+    int pindex = order_to_pindex(migratetype, order); // 通过 order 和 migratetype 定位 pcp
+    list_add(&page->lru, &pcp->lists[pindex]);
+    pcp->count += 1 << order;
+
+    int high = nr_pcp_high(pcp, zone);
+    if (pcp->count >= high) {
+        int batch = READ_ONCE(pcp->batch);
+        free_pcppages_bulk(zone, nr_pcp_free(pcp, high, batch), pcp);
+    }
+}
+```
